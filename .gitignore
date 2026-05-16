@@ -8,6 +8,11 @@ RCCarApp/node_modules/
 RCCarApp/.expo/
 RCCarApp/package-lock.json
 
+# Dashboard
+dashboard/node_modules/
+dashboard/package-lock.json
+dashboard/dist/
+
 # OS
 .DS_Store
 Thumbs.db
