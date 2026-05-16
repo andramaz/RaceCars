@@ -1,0 +1,13 @@
+# Python
+backend/venv/
+backend/__pycache__/
+*.pyc
+
+# Node / Expo
+RCCarApp/node_modules/
+RCCarApp/.expo/
+RCCarApp/package-lock.json
+
+# OS
+.DS_Store
+Thumbs.db
