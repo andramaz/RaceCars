@@ -4,9 +4,9 @@ main.py — FastAPI backend for the RC Car Control Platform.
 Responsibilities:
   - Accept WebSocket connections from the React Native app
   - Receive steering / throttle / emergency-stop commands
-  - Send fake telemetry every 500 ms
+  - Forward commands to the ESP32 via esp32_client
+  - Poll the ESP32 for real telemetry every 500 ms (falls back to simulation)
   - Implement fail-safe logic (throttle = 0 if no command for >1 s)
-  - Simulate forwarding commands to the ESP32 onboard controller
   - Expose REST endpoint GET /api/race-summary
 
 Run with:
@@ -22,6 +22,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import save_telemetry, get_race_summary
+import esp32_client
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -79,8 +80,8 @@ def check_fail_safe() -> None:
         car.fail_safe = False
 
 
-def process_command(data: dict) -> None:
-    """Parse and apply one incoming command message from the app."""
+async def process_command(data: dict) -> None:
+    """Parse, apply, and forward one incoming command message from the app."""
     msg_type = data.get("type")
 
     if msg_type == "command":
@@ -98,106 +99,103 @@ def process_command(data: dict) -> None:
             f"[CMD RECEIVED] steering={car.steering:+d}  "
             f"throttle={car.throttle}  mode={car.mode}"
         )
-        forward_command_to_esp32(car.steering, car.throttle)
+        await esp32_client.send_drive(car.steering, car.throttle)
 
     elif msg_type == "emergency_stop":
         car.emergency_stop = True
         car.throttle       = 0
         print("[EMERGENCY STOP] ACTIVATED — all throttle commands blocked.")
-        forward_command_to_esp32(car.steering, 0)
+        await esp32_client.send_emergency()
 
     elif msg_type == "reset_emergency_stop":
         car.emergency_stop    = False
         car.fail_safe         = False
-        car.last_command_time = time.time()   # reset the fail-safe timer too
+        car.last_command_time = time.time()
         print("[EMERGENCY STOP] Reset — commands accepted again.")
 
     else:
         print(f"[UNKNOWN MSG TYPE] {msg_type}")
 
 # ---------------------------------------------------------------------------
-# Simulated ESP32 forwarding
-# ---------------------------------------------------------------------------
-
-def forward_command_to_esp32(steering: int, throttle: int) -> None:
-    """
-    Simulate forwarding a drive command to the ESP32 onboard controller.
-
-    The ESP32 receives steering (-100…+100) and throttle (0…100), maps them
-    to PWM duty cycles, and drives the steering servo and ESC/motor.
-
-    TODO (hardware): Replace this function body with a real outbound call once
-    the ESP32 firmware is ready.  Options (pick one):
-
-        Option A — HTTP POST (simplest for ESP32 Arduino/MicroPython):
-            import httpx
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    "http://<ESP32_IP>/command",
-                    json={"steering": steering, "throttle": throttle},
-                    timeout=0.3,
-                )
-
-        Option B — MQTT (good for low-latency broadcast):
-            mqtt_client.publish(
-                "rc_car/command",
-                json.dumps({"steering": steering, "throttle": throttle}),
-            )
-
-        Option C — WebSocket to ESP32:
-            await esp32_ws.send(
-                json.dumps({"steering": steering, "throttle": throttle})
-            )
-
-    Network topology reminder:
-        PC hotspot  ←→  ESP32 (Wi-Fi client, static IP recommended)
-        PC hotspot  ←→  Phone (Wi-Fi client)
-        Phone connects to FastAPI at  ws://<PC_IP>:8000/ws
-        FastAPI connects to ESP32 at  http://<ESP32_IP>/command  (or MQTT)
-    """
-    print(f"[→ ESP32] steering={steering:+d}  throttle={throttle}")
-
-# ---------------------------------------------------------------------------
 # Telemetry generation (fake / simulated)
 # ---------------------------------------------------------------------------
 
-def generate_telemetry() -> dict:
+async def generate_telemetry() -> dict:
     """
-    Build a telemetry snapshot based on the current car state.
-    All values are simulated; replace with real sensor reads later.
+    Build a telemetry snapshot.
+    Tries to get real sensor data from the ESP32 first.
+    Falls back to simulation if the ESP32 is not connected yet.
     """
     check_fail_safe()
 
-    # Speed roughly proportional to throttle with a small random jitter.
-    speed = max(0.0, round((car.throttle / 100) * 4.0 + random.uniform(-0.05, 0.05), 2))
+    esp32_data = await esp32_client.fetch_telemetry()
 
-    # Slowly drain battery (0.01 % per 500 ms tick ≈ 1.2 % per minute).
-    car.battery_percentage = max(0.0, car.battery_percentage - 0.01)
-    car.battery_voltage    = round(6.0 + (car.battery_percentage / 100) * 2.4, 2)
+    if esp32_data:
+        t = esp32_data.get("telemetry", {})
 
-    # Simulate signal quality with weighted random noise.
-    roll = random.random()
-    if roll > 0.90:
-        signal_quality = "poor"
-    elif roll > 0.65:
-        signal_quality = "medium"
+        # Battery
+        battery            = t.get("battery", {})
+        battery_percentage = battery.get("pct", car.battery_percentage)
+        battery_voltage    = battery.get("v",   car.battery_voltage)
+        car.battery_percentage = battery_percentage
+        car.battery_voltage    = battery_voltage
+
+        # Speed from odometry (magnitude of X/Y velocity — placeholder until encoder speed added)
+        odometry = t.get("odometry", {})
+        speed    = round((odometry.get("x", 0.0) ** 2 + odometry.get("y", 0.0) ** 2) ** 0.5, 2)
+
+        # Signal quality from RSSI
+        rssi = t.get("wireless", {}).get("rssi", -999)
+        if rssi >= -60:
+            signal_quality = "good"
+        elif rssi >= -75:
+            signal_quality = "medium"
+        else:
+            signal_quality = "poor"
+
+        # Sync emergency and mode from ESP32 system state
+        system = t.get("system", {})
+        if system.get("emergency", False):
+            car.emergency_stop = True
+
+        print("[ESP32] Real telemetry received.")
     else:
-        signal_quality = "good"
+        # Simulated fallback — ESP32 not connected yet
+        t = {}
+        speed = max(0.0, round((car.throttle / 100) * 4.0 + random.uniform(-0.05, 0.05), 2))
+        car.battery_percentage = max(0.0, car.battery_percentage - 0.01)
+        car.battery_voltage    = round(6.0 + (car.battery_percentage / 100) * 2.4, 2)
+        battery_percentage = car.battery_percentage
+        battery_voltage    = car.battery_voltage
+
+        roll = random.random()
+        if roll > 0.90:
+            signal_quality = "poor"
+        elif roll > 0.65:
+            signal_quality = "medium"
+        else:
+            signal_quality = "good"
 
     telemetry = {
-        "type":              "telemetry",
-        "car_id":            "car_1",
-        "timestamp":         int(time.time()),
-        "speed":             speed,
-        "battery_percentage": round(car.battery_percentage, 1),
-        "battery_voltage":   car.battery_voltage,
-        "current_steering":  car.steering,
-        "current_throttle":  car.throttle,
-        "signal_quality":    signal_quality,
-        "emergency_stop":    car.emergency_stop,
-        "fail_safe":         car.fail_safe,
-        "mode":              car.mode,
+        "type":               "telemetry",
+        "car_id":             "car_1",
+        "timestamp":          int(time.time()),
+        "speed":              speed,
+        "battery_percentage": round(battery_percentage, 1),
+        "battery_voltage":    battery_voltage,
+        "current_steering":   car.steering,
+        "current_throttle":   car.throttle,
+        "signal_quality":     signal_quality,
+        "emergency_stop":     car.emergency_stop,
+        "fail_safe":          car.fail_safe,
+        "mode":               car.mode,
     }
+
+    # Attach real sensor data from ESP32 if available
+    if esp32_data:
+        for key in ("sonar", "lidar", "imu", "odometry", "control", "system", "wireless", "limits"):
+            if key in t:
+                telemetry[key] = t[key]
 
     save_telemetry(telemetry)
     return telemetry
@@ -221,7 +219,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     async def telemetry_loop() -> None:
         while True:
             try:
-                snapshot = generate_telemetry()
+                snapshot = await generate_telemetry()
                 await websocket.send_json(snapshot)
                 await asyncio.sleep(0.5)
             except Exception:
@@ -233,7 +231,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         while True:
             raw  = await websocket.receive_text()
             data = json.loads(raw)
-            process_command(data)
+            await process_command(data)
 
     except WebSocketDisconnect:
         print("[WS] App disconnected.")

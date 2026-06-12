@@ -85,7 +85,7 @@ export default function App() {
       })
       setChartData(prev => [
         ...prev.slice(-(MAX_POINTS - 1)),
-        { time: label, speed: data.speed, battery: data.battery_percentage },
+        { time: label, speed: data.speed, battery: data.battery_percentage, steering: data.current_steering },
       ])
 
       // Log safety state transitions only (not every tick).
@@ -212,6 +212,18 @@ export default function App() {
                 <YAxis tick={{ fill: C.muted, fontSize: 10 }} domain={[0, 100]} />
                 <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, fontSize: 12 }} />
                 <Line type="monotone" dataKey="battery" stroke={C.success} dot={false} strokeWidth={2} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          <Panel title="Live Steering (-100 … +100)" style={{ flex: 1 }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                <XAxis dataKey="time" tick={{ fill: C.muted, fontSize: 10 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fill: C.muted, fontSize: 10 }} domain={[-100, 100]} />
+                <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, fontSize: 12 }} />
+                <Line type="monotone" dataKey="steering" stroke={C.warning} dot={false} strokeWidth={2} isAnimationActive={false} />
               </LineChart>
             </ResponsiveContainer>
           </Panel>
