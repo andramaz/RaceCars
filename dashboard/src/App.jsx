@@ -130,6 +130,7 @@ export default function App() {
   const t           = telemetry
   const signalColor = { good: C.success, medium: C.warning, poor: C.danger }[t?.signal_quality] ?? C.muted
   const battColor   = !t ? C.muted : t.battery_percentage > 50 ? C.success : t.battery_percentage > 20 ? C.warning : C.danger
+  const motorColor  = { ARMED: C.success, DISARMED: C.muted, EMERGENCY: C.danger }[t?.motor_state] ?? C.muted
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -188,6 +189,7 @@ export default function App() {
             color={t?.emergency_stop ? C.danger : C.success} />
           <KpiCard label="Fail-Safe"      value={t ? (t.fail_safe ? 'ACTIVE' : 'OFF') : '—'}
             color={t?.fail_safe ? C.warning : C.success} />
+          <KpiCard label="Motor State"    value={t?.motor_state ?? '—'} color={motorColor} />
         </div>
 
         {/* ── Live charts ────────────────────────────────────────────────── */}
@@ -228,6 +230,55 @@ export default function App() {
             </ResponsiveContainer>
           </Panel>
         </div>
+
+        {/* ── ESP32 Sensor Data ──────────────────────────────────────────── */}
+        {t?.sonar || t?.lidar || t?.imu || t?.system ? (
+          <div style={{ ...s.chartRow, flexWrap: 'wrap' }}>
+
+            {/* System State */}
+            {t?.system && (
+              <Panel title="ESP32 System" style={{ flex: 1, minWidth: 200 }}>
+                <SummaryRow label="State"   value={t.system.mstate} />
+                <SummaryRow label="Mode"    value={t.system.mode} />
+                <SummaryRow label="Arm %"   value={`${t.system.armPct}%`} />
+                <SummaryRow label="Disarm Reason" value={t.system.disarmReason} />
+                <SummaryRow label="Emergency"     value={t.system.emergency ? '🛑 YES' : 'NO'} />
+              </Panel>
+            )}
+
+            {/* Sonar */}
+            {t?.sonar && (
+              <Panel title="Sonar" style={{ flex: 1, minWidth: 200 }}>
+                <SummaryRow label="Left (cm)"    value={t.sonar.lCm?.toFixed(1) ?? '—'} />
+                <SummaryRow label="Right (cm)"   value={t.sonar.rCm?.toFixed(1) ?? '—'} />
+                <SummaryRow label="Left Level"   value={`${t.sonar.lLv} / 4`} />
+                <SummaryRow label="Right Level"  value={`${t.sonar.rLv} / 4`} />
+                <SummaryRow label="Left Fwd"     value={t.sonar.lFwd?.toFixed(1) ?? '—'} />
+                <SummaryRow label="Right Fwd"    value={t.sonar.rFwd?.toFixed(1) ?? '—'} />
+              </Panel>
+            )}
+
+            {/* Lidar */}
+            {t?.lidar && (
+              <Panel title="Lidar (TF-Luna)" style={{ flex: 1, minWidth: 200 }}>
+                <SummaryRow label="Status"       value={t.lidar.ok ? '✅ OK' : '❌ Error'} />
+                <SummaryRow label="Distance (cm)" value={t.lidar.cm >= 0 ? t.lidar.cm?.toFixed(1) : '—'} />
+              </Panel>
+            )}
+
+            {/* IMU */}
+            {t?.imu && (
+              <Panel title="IMU (MPU6050)" style={{ flex: 1, minWidth: 200 }}>
+                <SummaryRow label="Roll"   value={`${t.imu.roll?.toFixed(2)}°`} />
+                <SummaryRow label="Pitch"  value={`${t.imu.pitch?.toFixed(2)}°`} />
+                <SummaryRow label="Yaw"    value={`${t.imu.yaw?.toFixed(2)}°`} />
+                <SummaryRow label="Temp"   value={`${t.imu.temp?.toFixed(1)} °C`} />
+                <SummaryRow label="Status" value={t.imu.calibrated ? '✅ Calibrated' : '⏳ Calibrating'} />
+              </Panel>
+            )}
+
+          </div>
+        ) : null}
 
         {/* ── Race summary + Event log ────────────────────────────────────── */}
         <div style={s.bottomRow}>

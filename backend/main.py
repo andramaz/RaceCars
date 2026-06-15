@@ -133,16 +133,16 @@ async def generate_telemetry() -> dict:
     if esp32_data:
         t = esp32_data.get("telemetry", {})
 
+        # Helper: treat JSON null as a fallback value
+        def _n(v, default):
+            return v if v is not None else default
+
         # Battery
         battery            = t.get("battery", {})
-        battery_percentage = battery.get("pct", car.battery_percentage)
-        battery_voltage    = battery.get("v",   car.battery_voltage)
+        battery_percentage = _n(battery.get("pct"), car.battery_percentage)
+        battery_voltage    = _n(battery.get("v"),   car.battery_voltage)
         car.battery_percentage = battery_percentage
         car.battery_voltage    = battery_voltage
-
-        # Speed from odometry (magnitude of X/Y velocity — placeholder until encoder speed added)
-        odometry = t.get("odometry", {})
-        speed    = round((odometry.get("x", 0.0) ** 2 + odometry.get("y", 0.0) ** 2) ** 0.5, 2)
 
         # Signal quality from RSSI
         rssi = t.get("wireless", {}).get("rssi", -999)
@@ -153,12 +153,27 @@ async def generate_telemetry() -> dict:
         else:
             signal_quality = "poor"
 
+        # Real steering + throttle from ESP32 control block, using live config
+        control  = t.get("control", {})
+        servo_us = _n(control.get("servoUs"), None)
+        esc_us   = _n(control.get("escUs"),   None)
+        if servo_us is not None:
+            car.steering = esp32_client.servo_us_to_pct(servo_us)
+        if esc_us is not None:
+            car.throttle = esp32_client.esc_us_to_pct(esc_us)
+
+        # Estimate speed from real throttle (no encoder yet)
+        speed = round((car.throttle / 100) * 4.0, 2)
+
         # Sync emergency and mode from ESP32 system state
         system = t.get("system", {})
-        if system.get("emergency", False):
+        mstate = system.get("mstate", "UNKNOWN")
+        if mstate == "EMERGENCY" or system.get("emergency", False):
             car.emergency_stop = True
+        elif mstate == "DISARMED":
+            car.emergency_stop = False
 
-        print("[ESP32] Real telemetry received.")
+        print(f"[ESP32] Telemetry OK — mstate={mstate}  servoUs={servo_us}  steer={car.steering}%")
     else:
         # Simulated fallback — ESP32 not connected yet
         t = {}
@@ -176,6 +191,8 @@ async def generate_telemetry() -> dict:
         else:
             signal_quality = "good"
 
+    esp32_system = esp32_data.get("telemetry", {}).get("system", {}) if esp32_data else {}
+
     telemetry = {
         "type":               "telemetry",
         "car_id":             "car_1",
@@ -189,6 +206,7 @@ async def generate_telemetry() -> dict:
         "emergency_stop":     car.emergency_stop,
         "fail_safe":          car.fail_safe,
         "mode":               car.mode,
+        "motor_state":        esp32_system.get("mstate", "UNKNOWN"),
     }
 
     # Attach real sensor data from ESP32 if available
@@ -221,9 +239,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             try:
                 snapshot = await generate_telemetry()
                 await websocket.send_json(snapshot)
-                await asyncio.sleep(0.5)
-            except Exception:
-                break   # WebSocket closed; stop the loop silently.
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                print(f"[TELEMETRY ERROR] {type(e).__name__}: {e}")
+            await asyncio.sleep(0.5)
 
     telemetry_task = asyncio.create_task(telemetry_loop())
 

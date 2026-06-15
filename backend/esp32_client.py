@@ -1,31 +1,93 @@
-"""
-esp32_client.py — All communication between the backend and the ESP32.
+﻿"""
+esp32_client.py - All communication between the backend and the ESP32.
 
 The backend initiates every exchange:
   - Sends drive commands (steering + throttle) when the app sends a command
   - Sends emergency stop when triggered
   - Polls the ESP32 for telemetry every 500 ms (called from the telemetry loop)
 
-ESP32 must expose these HTTP endpoints:
-  POST /drive      — body: { "steering": int, "throttle": int }
-  POST /emergency  — no body required
-  GET  /telemetry  — returns sensor snapshot (see fetch_telemetry docstring)
+ESP32 endpoints (http://esp.local:5000 or http://<IP>:5000):
+  POST /control?steer=<us>&thr=<us>  - drive command
+  POST /arm                           - arm motor (DISARMED -> ARMED)
+  POST /disarm                        - disarm motor
+  POST /estop                         - emergency stop (-> EMERGENCY state)
+  GET  /status                        - full telemetry snapshot
 
-Set the ESP32_IP environment variable to match your ESP32's static IP:
-  $env:ESP32_IP = "192.168.1.200"
+Set ESP32_HOST env var to the ESP32's IP for reliable connections on Windows:
+  $env:ESP32_HOST = "192.168.1.200"
+  (start.ps1 does this automatically via Resolve-DnsName / ping)
 """
 
 import os
+import socket as _socket
 import httpx
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-ESP32_IP      = os.getenv("ESP32_IP")          # None if not set
-ESP32_ENABLED = ESP32_IP is not None           # only attempt comms if IP is configured
-BASE_URL      = f"http://{ESP32_IP}" if ESP32_IP else ""
-TIMEOUT       = 0.3   # seconds — short so a missing ESP32 doesn't block the loop
+_raw_host = os.getenv("ESP32_HOST", "esp.local")
+
+# Resolve hostname to IP at startup.
+# Python/httpx on Windows often cannot resolve .local mDNS hostnames even when
+# the browser can. socket.gethostbyname() uses the OS resolver which usually works.
+if _raw_host and _raw_host != "":
+    try:
+        _resolved = _socket.gethostbyname(_raw_host)
+        if _resolved != _raw_host:
+            print(f"[ESP32] Resolved {_raw_host} -> {_resolved}")
+        ESP32_HOST = _resolved
+    except Exception as _e:
+        print(f"[ESP32] Could not resolve '{_raw_host}': {_e} — using as-is")
+        ESP32_HOST = _raw_host
+else:
+    ESP32_HOST = ""
+
+BASE_URL = f"http://{ESP32_HOST}:5000" if ESP32_HOST else ""
+TIMEOUT  = 2.0
+
+# Connection backoff — only retry every 5 s after a failure
+import time as _time
+_next_attempt: float = 0.0
+RETRY_INTERVAL = 5.0
+
+# Live config — updated from ESP32 /status response (config.servo / config.esc).
+# Defaults match the ESP32 firmware defaults until first /status is received.
+servo_config: dict = {"minUs": 1700, "neutralUs": 2000, "maxUs": 2300}
+esc_config:   dict = {"minUs": 1370, "neutralUs": 1470, "maxUs": 1600}
+
+def _steering_to_us(pct: int) -> int:
+    """Convert steering percentage (-100..+100) to servo µs using live config."""
+    mid = servo_config["neutralUs"]
+    if pct >= 0:
+        return int(mid + (pct / 100) * (servo_config["maxUs"] - mid))
+    else:
+        return int(mid + (pct / 100) * (mid - servo_config["minUs"]))
+
+def servo_us_to_pct(servo_us: int) -> int:
+    """Convert raw servo µs back to steering percentage (-100..+100)."""
+    mid = servo_config["neutralUs"]
+    if servo_us >= mid:
+        span = servo_config["maxUs"] - mid
+        return round((servo_us - mid) / span * 100) if span else 0
+    else:
+        span = mid - servo_config["minUs"]
+        return round((servo_us - mid) / span * 100) if span else 0
+
+def esc_us_to_pct(esc_us: int) -> int:
+    """Convert raw ESC µs back to throttle percentage (0..100)."""
+    mid = esc_config["neutralUs"]
+    max_us = esc_config["maxUs"]
+    span = max_us - mid
+    if span <= 0:
+        return 0
+    pct = round((esc_us - mid) / span * 100)
+    return max(0, min(100, pct))
+
+def _throttle_to_us(pct: int) -> int:
+    """Convert throttle percentage (0..100) to ESC µs using live config."""
+    mid = esc_config["neutralUs"]
+    return int(mid + (pct / 100) * (esc_config["maxUs"] - mid))
 
 # ---------------------------------------------------------------------------
 # Drive command
@@ -33,17 +95,19 @@ TIMEOUT       = 0.3   # seconds — short so a missing ESP32 doesn't block the l
 
 async def send_drive(steering: int, throttle: int) -> bool:
     """
-    Push steering + throttle to the ESP32.
-    Called every time the app sends a command.
-    Returns True on success, False if ESP32 is unreachable.
+    Push steering + throttle to the ESP32 via POST /control.
+    Converts percentage values to us before sending.
+    Only works when ESP32 is ARMED.
     """
-    if not ESP32_ENABLED:
+    if not BASE_URL:
         return False
+    steer_us = _steering_to_us(steering)
+    thr_us   = _throttle_to_us(throttle)
     try:
         async with httpx.AsyncClient() as client:
             r = await client.post(
-                f"{BASE_URL}/drive",
-                json={"steering": steering, "throttle": throttle},
+                f"{BASE_URL}/control",
+                params={"steer": steer_us, "thr": thr_us},
                 timeout=TIMEOUT,
             )
             return r.status_code == 200
@@ -57,20 +121,15 @@ async def send_drive(steering: int, throttle: int) -> bool:
 
 async def send_arm(armed: bool) -> bool:
     """
-    Arm or disarm the ESC.
-      armed=True  → arm   (enable motor, ready to drive)
-      armed=False → disarm (disable motor)
-    Called before sending drive commands and when shutting down.
+    Arm (armed=True) or disarm (armed=False) the motor.
+    Calls POST /arm or POST /disarm accordingly.
     """
-    if not ESP32_ENABLED:
+    if not BASE_URL:
         return False
+    endpoint = "/arm" if armed else "/disarm"
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{BASE_URL}/arm",
-                json={"armed": armed},
-                timeout=TIMEOUT,
-            )
+            r = await client.post(f"{BASE_URL}{endpoint}", timeout=TIMEOUT)
             print(f"[ESP32] {'Armed' if armed else 'Disarmed'}")
             return r.status_code == 200
     except Exception as e:
@@ -83,15 +142,14 @@ async def send_arm(armed: bool) -> bool:
 
 async def send_emergency() -> bool:
     """
-    Tell the ESP32 to cut throttle immediately.
-    Called when the app triggers an emergency stop.
-    Returns True on success.
+    Send emergency stop to ESP32 via POST /estop.
+    Moves ESP32 to EMERGENCY state. Requires /disarm to recover.
     """
-    if not ESP32_ENABLED:
+    if not BASE_URL:
         return False
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.post(f"{BASE_URL}/emergency", timeout=TIMEOUT)
+            r = await client.post(f"{BASE_URL}/estop", timeout=TIMEOUT)
             return r.status_code == 200
     except Exception as e:
         print(f"[ESP32] send_emergency failed: {e}")
@@ -103,70 +161,49 @@ async def send_emergency() -> bool:
 
 async def fetch_telemetry() -> dict | None:
     """
-    Ask the ESP32 for its latest sensor snapshot.
+    Poll ESP32 for latest sensor snapshot via GET /status.
     Called every 500 ms from the telemetry loop in main.py.
 
-    Expected JSON response from the ESP32:
+    Response format from ESP32:
     {
+        "config": {
+            "servo": { "minUs": 1700, "neutralUs": 2000, "maxUs": 2300 },
+            "esc":   { "minUs": 1370, "neutralUs": 1470, "maxUs": 1600 }
+        },
         "telemetry": {
-            "sonar": {
-                "lCm": 45.2,    "rCm": 38.7,    // raw distances (hypotenuse), cm
-                "lLv": 2,       "rLv": 1,        // proximity level 0-4
-                "lFwd": 32.0,   "lLat": 32.0,    // left forward/lateral projection, cm
-                "rFwd": 27.4,   "rLat": 27.4,    // right forward/lateral projection, cm
-                "angle": 45.0                     // mounting angle, degrees
-            },
-            "lidar": {
-                "ok": false,    // TF-Luna UART active?
-                "cm": -1.0      // forward distance, cm (-1 = error)
-            },
-            "imu": {
-                "ok": true,  "calibrated": true,
-                "ax": 0.012, "ay": -0.034, "az": 9.810,   // accel m/s²
-                "gx": 0.010, "gy": -0.020, "gz": 0.000,   // gyro deg/s
-                "roll": 1.20, "pitch": -0.50, "yaw": 45.30, // degrees
-                "temp": 32.1                                // °C
-            },
-            "odometry": {
-                "x": 0.142,     // dead-reckoning position X, m
-                "y": -0.037     // dead-reckoning position Y, m
-            },
-            "control": {
-                "steer": 1.23,  "steerPct": 0,  "servoUs": 2500,
-                "thrPct": 0,    "escUs": 1500
-            },
-            "battery": {
-                "v": 7.80,      // voltage, V
-                "pct": 57       // percentage 0-100
-            },
-            "system": {
-                "mstate": "ARMED",      // "ARMED" | "DISARMED"
-                "armPct": 100,          // arming progress %
-                "disarmReason": "none",
-                "mode": "AUTO",         // "AUTO" | "MANUAL"
-                "emergency": false
-            },
-            "wireless": {
-                "wifiOk": true,
-                "rssi": -62             // dBm
-            },
-            "limits": {
-                "throttleLimit": 40,
-                "autoThrottle": 30
-            }
+            "sonar":    { "lCm", "rCm", "lLv", "rLv", "lFwd", "lLat", "rFwd", "rLat", "angle" },
+            "lidar":    { "ok", "cm" },
+            "imu":      { "ok", "calibrated", "ax", "ay", "az", "gx", "gy", "gz", "roll", "pitch", "yaw", "temp" },
+            "odometry": { "x", "y" },
+            "control":  { "steer", "steerPct", "servoUs", "thrPct", "escUs" },
+            "battery":  { "v", "pct" },
+            "system":   { "mstate", "armPct", "disarmReason", "mode", "emergency" },
+            "wireless": { "wifiOk", "rssi" },
+            "limits":   { "throttleLimit", "autoThrottle" }
         }
     }
 
-    Returns the parsed dict on success, or None if the ESP32 is
-    unreachable (caller falls back to simulated values).
+    Returns the parsed dict on success, None if ESP32 unreachable.
     """
-    if not ESP32_ENABLED:
+    if not BASE_URL:
+        return None
+    global _next_attempt
+    now = _time.time()
+    if now < _next_attempt:
         return None
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(f"{BASE_URL}/telemetry", timeout=TIMEOUT)
+            r = await client.get(f"{BASE_URL}/status", timeout=TIMEOUT)
             if r.status_code == 200:
-                return r.json()
+                _next_attempt = 0
+                data = r.json()
+                # Sync live servo/esc config from ESP32
+                cfg = data.get("config", {})
+                if cfg.get("servo"):
+                    servo_config.update(cfg["servo"])
+                if cfg.get("esc"):
+                    esc_config.update(cfg["esc"])
+                return data
     except Exception:
-        pass  # ESP32 not connected yet — silent fallback
+        _next_attempt = _time.time() + RETRY_INTERVAL
     return None
