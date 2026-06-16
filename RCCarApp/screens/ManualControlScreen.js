@@ -40,8 +40,9 @@ export default function ManualControlScreen() {
   throttleLockedRef.current = throttleLocked;
   lockedThrottleRef.current = lockedThrottle;
 
-  const knobX = useRef(new Animated.Value(0)).current;
-  const knobY = useRef(new Animated.Value(0)).current;
+  const knobX        = useRef(new Animated.Value(0)).current;
+  const knobY        = useRef(new Animated.Value(0)).current;
+  const heartbeatRef = useRef(null);
 
   // ── Send ──────────────────────────────────────────────────────────────────
 
@@ -110,6 +111,10 @@ export default function ManualControlScreen() {
       onPanResponderGrant: () => {
         knobX.stopAnimation();
         knobY.stopAnimation();
+        // Heartbeat: keep sending current position every 200ms while held
+        heartbeatRef.current = setInterval(() => {
+          sendDrive(steeringRef.current, throttleLockedRef.current ? lockedThrottleRef.current : throttleRef.current);
+        }, 200);
       },
 
       onPanResponderMove: (_, g) => {
@@ -133,8 +138,16 @@ export default function ManualControlScreen() {
         sendDrive(s, t);
       },
 
-      onPanResponderRelease:   () => snapToCenter(),
-      onPanResponderTerminate: () => snapToCenter(),
+      onPanResponderRelease: () => {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+        snapToCenter();
+      },
+      onPanResponderTerminate: () => {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+        snapToCenter();
+      },
     })
   ).current;
 

@@ -186,7 +186,7 @@ async def generate_telemetry() -> dict:
         elif mstate == "DISARMED":
             car.emergency_stop = False
 
-        print(f"[ESP32] Telemetry OK — mstate={mstate}  servoUs={servo_us}  steer={car.steering}%")
+        print(f"[ESP32] Telemetry OK — mstate={mstate}  servoUs={servo_us}  steer={car.steering}%  escUs={esc_us}  thr={car.throttle}%")
     else:
         # Simulated fallback — ESP32 not connected yet
         t = {}
