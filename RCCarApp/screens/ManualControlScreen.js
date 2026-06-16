@@ -5,7 +5,7 @@
  * Lock mode   : joystick X = steering only. Bottom slider sets fixed throttle.
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
   Switch, PanResponder, Animated, Dimensions,
@@ -42,7 +42,26 @@ export default function ManualControlScreen() {
 
   const knobX        = useRef(new Animated.Value(0)).current;
   const knobY        = useRef(new Animated.Value(0)).current;
-  const heartbeatRef = useRef(null);
+  const heartbeatRef = useRef(null);  // joystick-held heartbeat
+  const keepAliveRef = useRef(null);  // always-on keepalive while connected
+
+  // Keep-alive: send current position every 500ms so fail-safe never triggers
+  useEffect(() => {
+    if (connected && !isAutonomous) {
+      keepAliveRef.current = setInterval(() => {
+        const s = steeringRef.current;
+        const t = throttleLockedRef.current ? lockedThrottleRef.current : throttleRef.current;
+        sendDrive(s, t);
+      }, 500);
+    } else {
+      clearInterval(keepAliveRef.current);
+      keepAliveRef.current = null;
+    }
+    return () => {
+      clearInterval(keepAliveRef.current);
+      keepAliveRef.current = null;
+    };
+  }, [connected, isAutonomous]);
 
   // ── Send ──────────────────────────────────────────────────────────────────
 

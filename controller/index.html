@@ -252,7 +252,11 @@
 
   // Detect backend IP from current page URL and pre-fill WS input
   (function prefillWsUrl() {
-    const host = location.hostname;
+    // If opened directly from the backend (localhost/127.0.0.1), use localhost.
+    // If opened from another IP (e.g. phone), use that IP.
+    const host = (location.hostname === '127.0.0.1' || location.hostname === '')
+      ? 'localhost'
+      : location.hostname;
     $('wsUrl').value = `ws://${host}:8000/ws`;
   })();
 
