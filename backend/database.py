@@ -60,18 +60,49 @@ _init_influx()
 
 # ── Session tracking ───────────────────────────────────────────────────────
 _current_session_id: str = ""
+_session_active: bool = False   # True only while ARMED (InfluxDB writes enabled)
 
 
 def new_session() -> str:
-    """Start a new race session. Call when a WebSocket client connects."""
+    """Called on WebSocket connect — resets in-memory buffer ID only."""
     global _current_session_id
-    _current_session_id = f"s_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    print(f"[DB] Session started: {_current_session_id}")
-    return _current_session_id
+    _current_session_id = ""    # cleared; will be set by arm_session()
+    return ""
 
 
 def current_session() -> str:
     return _current_session_id
+
+
+def arm_session(car_id: str = "car_1") -> str:
+    """
+    Start a new InfluxDB session.  Call when motor state transitions → ARMED.
+    If a session is already active (e.g. wall-recovery re-arm), keep the
+    existing session ID so the run appears as one continuous session.
+    """
+    global _current_session_id, _session_active
+    if _session_active:
+        print(f"[DB] Session resumed (wall re-arm): {_current_session_id}")
+        return _current_session_id
+    _current_session_id = f"s_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    _session_active = True
+    print(f"[DB] Session ARMED — started: {_current_session_id}")
+    return _current_session_id
+
+
+def end_session() -> None:
+    """
+    End the current InfluxDB session.  Call when:
+      - Motor transitions ARMED → DISARMED (immediate)
+      - Motor is in EMERGENCY and grace period (60 s) expires without re-arm
+    """
+    global _current_session_id, _session_active
+    if not _session_active:
+        return
+    print(f"[DB] Session ended: {_current_session_id}")
+    _session_active = False
+    # Keep _current_session_id so the last telemetry point can still reference it;
+    # next arm_session() call will create a fresh ID.
 
 
 # ── Sensor error helper ────────────────────────────────────────────────────
@@ -103,8 +134,8 @@ def save_telemetry(data: dict[str, Any]) -> None:
     if len(_telemetry_buffer) > MAX_BUFFER_SIZE:
         _telemetry_buffer.pop(0)
 
-    # ── InfluxDB (history tab) — only when configured ─────────────────────
-    if not INFLUX_ENABLED or not _current_session_id:
+    # ── InfluxDB (history tab) — only when ARMED session is active ───────
+    if not INFLUX_ENABLED or not _session_active or not _current_session_id:
         return
     try:
         from influxdb_client import Point, WritePrecision
