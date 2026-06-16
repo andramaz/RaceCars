@@ -67,7 +67,7 @@ if ($ESP32_IP) {
 Write-Host ""
 
 # --- InfluxDB token (History tab icin) ---
-$INFLUX_TOKEN  = $env:INFLUXDB_TOKEN
+$INFLUX_TOKEN  = "fdjuFn3D8ShgVz2GqdU4A_9xs2L9NfnXkXIPlmvHGvbmdMfOvhnd0EbALpfvil3nLG1QfbIpARPMABbgtRpJtQ=="
 $INFLUX_ORG    = if ($env:INFLUXDB_ORG)    { $env:INFLUXDB_ORG    } else { "rc_car_org" }
 $INFLUX_BUCKET = if ($env:INFLUXDB_BUCKET) { $env:INFLUXDB_BUCKET } else { "rc_car" }
 
@@ -79,6 +79,12 @@ if ($INFLUX_TOKEN) {
 Write-Host ""
 
 # --- Servisleri basla ---
+
+# InfluxDB
+Start-Process powershell -ArgumentList "-NoExit", "-Command",
+    "Write-Host 'INFLUXDB STARTING...' -ForegroundColor Cyan; influxd"
+
+Start-Sleep -Seconds 3
 
 # Backend (ESP32_IP + InfluxDB env var'lariyla)
 Start-Process powershell -ArgumentList "-NoExit", "-Command",
