@@ -21,7 +21,11 @@ import random
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import save_telemetry, get_race_summary
+from database import (
+    save_telemetry, get_race_summary,
+    new_session, current_session, get_sessions, get_session_data,
+    INFLUX_ENABLED,
+)
 import esp32_client
 
 # ---------------------------------------------------------------------------
@@ -240,7 +244,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     - Sends a telemetry snapshot every 500 ms on a background task.
     """
     await websocket.accept()
-    print("[WS] App connected.")
+    session_id = new_session()
+    print(f"[WS] App connected — session {session_id}")
 
     # Background task: push telemetry every 500 ms.
     async def telemetry_loop() -> None:
@@ -281,8 +286,22 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
 @app.get("/api/race-summary")
 async def race_summary_endpoint() -> dict:
-    """Return fake race analytics. Replace with real InfluxDB queries later."""
     return get_race_summary()
+
+
+@app.get("/api/history/sessions")
+async def history_sessions_endpoint() -> dict:
+    """List past race sessions stored in InfluxDB (last 30 days)."""
+    return {
+        "influx_enabled": INFLUX_ENABLED,
+        "sessions":       get_sessions(limit=20),
+    }
+
+
+@app.get("/api/history/sessions/{session_id}")
+async def history_session_detail_endpoint(session_id: str) -> dict:
+    """Return time-series data + stats for a single past session."""
+    return get_session_data(session_id)
 
 
 @app.get("/")

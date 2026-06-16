@@ -44,6 +44,15 @@ export default function App() {
   const [summary,   setSummary]   = useState(null)
   const [fetching,  setFetching]  = useState(false)
 
+  // ── Tab state ─────────────────────────────────────────────────────────────
+  const [activeTab,       setActiveTab]       = useState('live')
+  const [sessions,        setSessions]        = useState([])
+  const [loadingSessions, setLoadingSessions] = useState(false)
+  const [influxEnabled,   setInfluxEnabled]   = useState(null)
+  const [selectedSession, setSelectedSession] = useState(null)
+  const [sessionData,     setSessionData]     = useState(null)
+  const [loadingSession,  setLoadingSession]  = useState(false)
+
   const wsRef            = useRef(null)
   const prevEmergencyRef = useRef(false)
   const prevFailSafeRef  = useRef(false)
@@ -125,6 +134,43 @@ export default function App() {
     }
   }
 
+  // ── History tab helpers ───────────────────────────────────────────────────
+
+  const base = () => wsUrl.replace(/^ws:\/\//, 'http://').replace(/\/ws$/, '')
+
+  const fetchSessions = async () => {
+    setLoadingSessions(true)
+    setSessions([])
+    setSelectedSession(null)
+    setSessionData(null)
+    try {
+      const res  = await fetch(`${base()}/api/history/sessions`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setInfluxEnabled(data.influx_enabled)
+      setSessions(data.sessions || [])
+    } catch (err) {
+      addLog(`History fetch failed: ${err.message}`, 'danger')
+    } finally {
+      setLoadingSessions(false)
+    }
+  }
+
+  const fetchSessionDetail = async (sessionId) => {
+    setLoadingSession(true)
+    setSelectedSession(sessionId)
+    setSessionData(null)
+    try {
+      const res  = await fetch(`${base()}/api/history/sessions/${sessionId}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setSessionData(await res.json())
+    } catch (err) {
+      addLog(`Session load failed: ${err.message}`, 'danger')
+    } finally {
+      setLoadingSession(false)
+    }
+  }
+
   // ── Derived display values ────────────────────────────────────────────────
 
   const t           = telemetry
@@ -162,19 +208,58 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Safety banners ─────────────────────────────────────────────── */}
-      {t?.emergency_stop && (
+      {/* ── Tab bar ────────────────────────────────────────────────────── */}
+      <div style={s.tabBar}>
+        {['live', 'history'].map(tab => (
+          <button
+            key={tab}
+            style={{
+              ...s.tabBtn,
+              color:       activeTab === tab ? C.primary       : C.muted,
+              borderBottom: activeTab === tab ? `2px solid ${C.primary}` : '2px solid transparent',
+              background:  'none',
+            }}
+            onClick={() => { setActiveTab(tab); if (tab === 'history' && sessions.length === 0) fetchSessions() }}
+          >
+            {tab === 'live' ? '● Live' : '◷ History'}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Safety banners (live only) ──────────────────────────────────── */}
+      {activeTab === 'live' && t?.emergency_stop && (
         <div style={{ ...s.banner, borderColor: C.danger, background: C.danger + '22', color: C.danger }}>
           🛑  EMERGENCY STOP IS ACTIVE — throttle is locked at 0
         </div>
       )}
-      {t?.fail_safe && (
+      {activeTab === 'live' && t?.fail_safe && (
         <div style={{ ...s.banner, borderColor: C.warning, background: C.warning + '22', color: C.warning }}>
           ⚠  FAIL-SAFE ACTIVE — backend received no command for &gt;1 s
         </div>
       )}
 
       <main style={s.main}>
+
+        {/* ══════════════════════════════════════════════════════════════════
+            HISTORY TAB
+        ═══════════════════════════════════════════════════════════════════ */}
+        {activeTab === 'history' && (
+          <HistoryTab
+            sessions={sessions}
+            loading={loadingSessions}
+            influxEnabled={influxEnabled}
+            onRefresh={fetchSessions}
+            onSelectSession={fetchSessionDetail}
+            selectedSession={selectedSession}
+            sessionData={sessionData}
+            loadingSession={loadingSession}
+          />
+        )}
+
+        {/* ══════════════════════════════════════════════════════════════════
+            LIVE TAB
+        ═══════════════════════════════════════════════════════════════════ */}
+        {activeTab === 'live' && <>
 
         {/* ── KPI cards ──────────────────────────────────────────────────── */}
         <div style={s.kpiGrid}>
@@ -359,7 +444,168 @@ export default function App() {
           </Panel>
 
         </div>
+        </>}
+
       </main>
+    </div>
+  )
+}
+
+// ── History tab component ─────────────────────────────────────────────────
+
+function HistoryTab({
+  sessions, loading, influxEnabled, onRefresh,
+  onSelectSession, selectedSession, sessionData, loadingSession,
+}) {
+  const fmtTime = (iso) => {
+    if (!iso) return '—'
+    const d = new Date(iso)
+    return d.toLocaleString('tr-TR', {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    })
+  }
+
+  const fmtDuration = (secs) => {
+    if (!secs) return '—'
+    const m = Math.floor(secs / 60)
+    const s = secs % 60
+    return m > 0 ? `${m}m ${s}s` : `${s}s`
+  }
+
+  return (
+    <div>
+      {/* ── Header row ─────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <span style={{ fontSize: 18, fontWeight: 700 }}>Race History</span>
+        <button
+          style={{ ...s.btn, background: C.primaryDark, padding: '5px 16px', fontSize: 13 }}
+          onClick={onRefresh}
+          disabled={loading}
+        >
+          {loading ? 'Loading…' : '↻ Refresh'}
+        </button>
+        {influxEnabled === false && (
+          <span style={{ fontSize: 13, color: C.warning }}>
+            ⚠ InfluxDB not configured — set INFLUXDB_TOKEN in start.ps1
+          </span>
+        )}
+        {influxEnabled === true && sessions.length === 0 && !loading && (
+          <span style={{ fontSize: 13, color: C.muted }}>No sessions recorded yet.</span>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+
+        {/* ── Session list ────────────────────────────────────────────────── */}
+        {sessions.length > 0 && (
+          <Panel title="Sessions (last 30 days)" style={{ minWidth: 300, flex: '0 0 300px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {sessions.map(sess => (
+                <div
+                  key={sess.session_id}
+                  style={{
+                    padding: '10px 12px', borderRadius: 8, cursor: 'pointer',
+                    border: `1px solid ${selectedSession === sess.session_id ? C.primary : C.border}`,
+                    background: selectedSession === sess.session_id ? C.primary + '18' : C.surfaceAlt,
+                  }}
+                  onClick={() => onSelectSession(sess.session_id)}
+                >
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 2 }}>
+                    {sess.car_id}
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>
+                    {fmtTime(sess.start_time)}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.primary, marginTop: 2 }}>
+                    {sess.session_id}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        )}
+
+        {/* ── Session detail ───────────────────────────────────────────────── */}
+        {selectedSession && (
+          <div style={{ flex: 1, minWidth: 400 }}>
+            {loadingSession ? (
+              <Panel title="Loading session…">
+                <p style={{ color: C.muted, fontSize: 13 }}>Fetching data from InfluxDB…</p>
+              </Panel>
+            ) : sessionData?.error ? (
+              <Panel title="Error">
+                <p style={{ color: C.danger, fontSize: 13 }}>{sessionData.error}</p>
+              </Panel>
+            ) : sessionData ? (
+              <>
+                {/* Stats row */}
+                <div style={{ ...s.kpiGrid, marginBottom: 16 }}>
+                  <KpiCard label="Top Speed"    value={sessionData.stats?.top_speed ?? '—'}     unit="m/s" color={C.primary} />
+                  <KpiCard label="Avg Speed"    value={sessionData.stats?.average_speed ?? '—'} unit="m/s" />
+                  <KpiCard label="Duration"     value={fmtDuration(sessionData.stats?.duration_s)} />
+                  <KpiCard label="Data Points"  value={sessionData.stats?.data_points ?? '—'} />
+                </div>
+
+                {/* Speed chart */}
+                {sessionData.speed_series?.length > 0 && (
+                  <Panel title="Speed (m/s)" style={{ marginBottom: 16 }}>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <LineChart
+                        data={sessionData.speed_series.map(p => ({ ...p, label: new Date(p.time * 1000).toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) }))}
+                        margin={{ top: 4, right: 8, bottom: 0, left: -20 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                        <XAxis dataKey="label" tick={{ fill: C.muted, fontSize: 10 }} interval="preserveStartEnd" />
+                        <YAxis tick={{ fill: C.muted, fontSize: 10 }} domain={[0, 5]} />
+                        <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, fontSize: 12 }} />
+                        <Line type="monotone" dataKey="speed" stroke={C.primary} dot={false} strokeWidth={2} isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Panel>
+                )}
+
+                {/* Battery chart */}
+                {sessionData.battery_series?.length > 0 && (
+                  <Panel title="Battery (%)" style={{ marginBottom: 16 }}>
+                    <ResponsiveContainer width="100%" height={180}>
+                      <LineChart
+                        data={sessionData.battery_series.map(p => ({ ...p, label: new Date(p.time * 1000).toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) }))}
+                        margin={{ top: 4, right: 8, bottom: 0, left: -20 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                        <XAxis dataKey="label" tick={{ fill: C.muted, fontSize: 10 }} interval="preserveStartEnd" />
+                        <YAxis tick={{ fill: C.muted, fontSize: 10 }} domain={[0, 100]} />
+                        <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, fontSize: 12 }} />
+                        <Line type="monotone" dataKey="battery" stroke={C.success} dot={false} strokeWidth={2} isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Panel>
+                )}
+
+                {/* Steering chart */}
+                {sessionData.steering_series?.length > 0 && (
+                  <Panel title="Steering (-100 … +100)">
+                    <ResponsiveContainer width="100%" height={180}>
+                      <LineChart
+                        data={sessionData.steering_series.map(p => ({ ...p, label: new Date(p.time * 1000).toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) }))}
+                        margin={{ top: 4, right: 8, bottom: 0, left: -20 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                        <XAxis dataKey="label" tick={{ fill: C.muted, fontSize: 10 }} interval="preserveStartEnd" />
+                        <YAxis tick={{ fill: C.muted, fontSize: 10 }} domain={[-100, 100]} />
+                        <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, fontSize: 12 }} />
+                        <Line type="monotone" dataKey="steering" stroke={C.warning} dot={false} strokeWidth={2} isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Panel>
+                )}
+              </>
+            ) : null}
+          </div>
+        )}
+
+      </div>
     </div>
   )
 }
@@ -457,6 +703,17 @@ const s = {
     alignItems: 'center', marginBottom: 12,
   },
   panelTitle: { fontSize: 15, fontWeight: 600 },
+
+  tabBar: {
+    display: 'flex', gap: 0,
+    borderBottom: `1px solid ${C.border}`,
+    background: C.surface, paddingLeft: 24,
+  },
+  tabBtn: {
+    padding: '10px 24px', fontSize: 14, fontWeight: 600,
+    border: 'none', cursor: 'pointer',
+    transition: 'color 0.15s',
+  },
 
   logList: { maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 },
   logEntry: {

@@ -66,11 +66,23 @@ if ($ESP32_IP) {
 
 Write-Host ""
 
+# --- InfluxDB token (History tab icin) ---
+$INFLUX_TOKEN  = $env:INFLUXDB_TOKEN
+$INFLUX_ORG    = if ($env:INFLUXDB_ORG)    { $env:INFLUXDB_ORG    } else { "rc_car_org" }
+$INFLUX_BUCKET = if ($env:INFLUXDB_BUCKET) { $env:INFLUXDB_BUCKET } else { "rc_car" }
+
+if ($INFLUX_TOKEN) {
+    Write-Host "  InfluxDB  : token set (History tab aktif)" -ForegroundColor Green
+} else {
+    Write-Host "  InfluxDB  : token yok (History tab pasif - sadece live)" -ForegroundColor DarkGray
+}
+Write-Host ""
+
 # --- Servisleri basla ---
 
-# Backend (ESP32_IP'yi ortam degiskeni olarak ilet)
+# Backend (ESP32_IP + InfluxDB env var'lariyla)
 Start-Process powershell -ArgumentList "-NoExit", "-Command",
-    "`$env:ESP32_HOST='$ESP32_IP'; cd '$ROOT\backend'; Write-Host 'BACKEND STARTING...' -ForegroundColor Cyan; venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+    "`$env:ESP32_HOST='$ESP32_IP'; `$env:INFLUXDB_TOKEN='$INFLUX_TOKEN'; `$env:INFLUXDB_ORG='$INFLUX_ORG'; `$env:INFLUXDB_BUCKET='$INFLUX_BUCKET'; cd '$ROOT\backend'; Write-Host 'BACKEND STARTING...' -ForegroundColor Cyan; venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
 
 Start-Sleep -Seconds 2
 
