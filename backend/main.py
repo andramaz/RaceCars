@@ -20,6 +20,7 @@ import random
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from database import (
     save_telemetry, get_race_summary,
@@ -304,6 +305,14 @@ async def history_session_detail_endpoint(session_id: str) -> dict:
     return get_session_data(session_id)
 
 
+@app.get("/controller")
+async def controller_page():
+    """Standalone joystick controller page — open in any browser."""
+    import os
+    path = os.path.join(os.path.dirname(__file__), "..", "controller", "index.html")
+    return FileResponse(os.path.abspath(path))
+
+
 @app.get("/")
 async def root() -> dict:
-    return {"status": "RC Car backend is running", "docs": "/docs"}
+    return {"status": "RC Car backend is running", "docs": "/docs", "controller": "/controller"}

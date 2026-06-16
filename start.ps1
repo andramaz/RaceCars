@@ -15,7 +15,8 @@ Write-Host "  RC Car Platform" -ForegroundColor Cyan
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host "  PC IP     : $IP" -ForegroundColor Green
 Write-Host "  Backend   : http://$IP`:8000" -ForegroundColor Green
-Write-Host "  Dashboard : http://localhost:5173" -ForegroundColor Green
+Write-Host "  Dashboard  : http://localhost:5173" -ForegroundColor Green
+Write-Host "  Controller : http://localhost:8000/controller" -ForegroundColor Green
 Write-Host "  App WS URL: ws://$IP`:8000/ws" -ForegroundColor Yellow
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host ""
