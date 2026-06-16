@@ -82,7 +82,7 @@ Write-Host ""
 
 # InfluxDB
 Start-Process powershell -ArgumentList "-NoExit", "-Command",
-    "Write-Host 'INFLUXDB STARTING...' -ForegroundColor Cyan; influxd"
+    "Write-Host 'INFLUXDB STARTING...' -ForegroundColor Cyan; & 'C:\Users\andrei\AppData\Local\Microsoft\WinGet\Packages\InfluxData.InfluxDB.OSS_Microsoft.Winget.Source_8wekyb3d8bbwe\influxd.exe'"
 
 Start-Sleep -Seconds 3
 
