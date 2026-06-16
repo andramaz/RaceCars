@@ -226,15 +226,6 @@ export default function ManualControlScreen() {
 
       {/* ── Joystick ──────────────────────────────────────────────── */}
       <View style={styles.joyArea}>
-        {!throttleLocked && (
-          <Text style={[styles.dir, styles.dirTop, throttle > 10 && styles.dirFwd]}>▲ Forward</Text>
-        )}
-        {!throttleLocked && (
-          <Text style={[styles.dir, styles.dirBottom, throttle < -10 && styles.dirRev]}>▼ Reverse</Text>
-        )}
-        <Text style={[styles.dir, styles.dirLeft,  steering < -10 && styles.dirSide]}>◀</Text>
-        <Text style={[styles.dir, styles.dirRight, steering > 10  && styles.dirSide]}>▶</Text>
-
         <View
           style={[styles.outerCircle, joystickDisabled && styles.outerDisabled,
                   throttleLocked && styles.outerLocked]}
@@ -242,6 +233,17 @@ export default function ManualControlScreen() {
         >
           <View style={styles.crossH} />
           {!throttleLocked && <View style={styles.crossV} />}
+
+          {/* Direction labels inside the circle */}
+          {!throttleLocked && (
+            <Text style={[styles.dirInner, styles.dirInnerTop, throttle > 10 && styles.dirFwd]}>▲</Text>
+          )}
+          {!throttleLocked && (
+            <Text style={[styles.dirInner, styles.dirInnerBottom, throttle < -10 && styles.dirRev]}>▼</Text>
+          )}
+          <Text style={[styles.dirInner, styles.dirInnerLeft,  steering < -10 && styles.dirSide]}>◀</Text>
+          <Text style={[styles.dirInner, styles.dirInnerRight, steering > 10  && styles.dirSide]}>▶</Text>
+
           <Animated.View
             style={[
               styles.knob,
@@ -381,14 +383,14 @@ const styles = StyleSheet.create({
 
   joyArea: { flex: 1, alignItems: 'center', justifyContent: 'center', position: 'relative' },
 
-  dir:       { position: 'absolute', fontSize: 13, fontWeight: '600', color: colors.border },
-  dirTop:    { top: -28, alignSelf: 'center' },
-  dirBottom: { bottom: -28, alignSelf: 'center' },
-  dirLeft:   { left: -28 },
-  dirRight:  { right: -28 },
-  dirFwd:    { color: colors.success },
-  dirRev:    { color: colors.danger },
-  dirSide:   { color: colors.primary },
+  dirInner:       { position: 'absolute', fontSize: 16, fontWeight: '600', color: colors.border },
+  dirInnerTop:    { top: 10, alignSelf: 'center' },
+  dirInnerBottom: { bottom: 10, alignSelf: 'center' },
+  dirInnerLeft:   { left: 10, top: '50%', marginTop: -10 },
+  dirInnerRight:  { right: 10, top: '50%', marginTop: -10 },
+  dirFwd:  { color: colors.success },
+  dirRev:  { color: colors.danger },
+  dirSide: { color: colors.primary },
 
   outerCircle: {
     width: OUTER, height: OUTER, borderRadius: OUTER / 2,

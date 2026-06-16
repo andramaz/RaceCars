@@ -18,6 +18,7 @@ Set ESP32_HOST env var to the ESP32's IP for reliable connections on Windows:
   (start.ps1 does this automatically via Resolve-DnsName / ping)
 """
 
+import asyncio
 import os
 import socket as _socket
 import httpx
@@ -125,19 +126,25 @@ async def send_drive(steering: int, throttle: int) -> bool:
 async def send_arm(armed: bool) -> bool:
     """
     Arm (armed=True) or disarm (armed=False) the motor.
-    Calls POST /arm or POST /disarm accordingly.
+    Retries up to 3 times with 400 ms between attempts.
     """
     if not BASE_URL:
         return False
     endpoint = "/arm" if armed else "/disarm"
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(f"{BASE_URL}{endpoint}", timeout=TIMEOUT)
-            print(f"[ESP32] {'Armed' if armed else 'Disarmed'}")
-            return r.status_code == 200
-    except Exception as e:
-        print(f"[ESP32] send_arm failed: {e}")
-        return False
+    label    = "ARM" if armed else "DISARM"
+    for attempt in range(1, 4):
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(f"{BASE_URL}{endpoint}", timeout=TIMEOUT)
+                if r.status_code == 200:
+                    print(f"[ESP32] {label} OK (attempt {attempt})")
+                    return True
+                print(f"[ESP32] {label} attempt {attempt} → HTTP {r.status_code}")
+        except Exception as e:
+            print(f"[ESP32] {label} attempt {attempt} failed: {type(e).__name__}: {e}")
+        await asyncio.sleep(0.4)
+    print(f"[ESP32] {label} failed after 3 attempts")
+    return False
 
 # ---------------------------------------------------------------------------
 # Emergency stop
