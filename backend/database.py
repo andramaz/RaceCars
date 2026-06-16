@@ -74,6 +74,26 @@ def current_session() -> str:
     return _current_session_id
 
 
+# ── Sensor error helper ────────────────────────────────────────────────────
+
+def _has_sensor_error(data: dict) -> bool:
+    """Return True if any sensor reported a fault in this telemetry packet."""
+    lidar = data.get("lidar", {})
+    imu   = data.get("imu",   {})
+    lidar_err = lidar and lidar.get("ok") is False
+    imu_err   = imu   and imu.get("ok")   is False
+    return bool(lidar_err or imu_err)
+
+
+def _sensor_error_rate(buffer: list[dict]) -> float:
+    """Calculate % of packets with a sensor fault from a telemetry buffer."""
+    packets_with_sensors = [t for t in buffer if t.get("lidar") or t.get("imu")]
+    if not packets_with_sensors:
+        return 0.0
+    errors = sum(1 for t in packets_with_sensors if _has_sensor_error(t))
+    return round(errors / len(packets_with_sensors) * 100, 1)
+
+
 # ── Write ──────────────────────────────────────────────────────────────────
 
 def save_telemetry(data: dict[str, Any]) -> None:
@@ -99,6 +119,7 @@ def save_telemetry(data: dict[str, Any]) -> None:
             .field("current_throttle",   int(  data.get("current_throttle",   0)))
             .field("motor_state",        str(  data.get("motor_state",        "UNKNOWN")))
             .field("emergency_stop",     bool( data.get("emergency_stop",     False)))
+            .field("sensor_error",       bool(_has_sensor_error(data)))
             .time(data["timestamp"], WritePrecision.S)
         )
         _write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
@@ -163,7 +184,8 @@ from(bucket: "{INFLUX_BUCKET}")
   |> filter(fn: (r) =>
       r._field == "speed" or
       r._field == "battery_percentage" or
-      r._field == "current_steering")
+      r._field == "current_steering" or
+      r._field == "sensor_error")
   |> sort(columns: ["_time"])
 '''
         tables          = _query_api.query(flux, org=INFLUX_ORG)
@@ -171,6 +193,8 @@ from(bucket: "{INFLUX_BUCKET}")
         battery_series  = []
         steering_series = []
         speeds          = []
+        sensor_errors   = 0
+        sensor_total    = 0
 
         for table in tables:
             for record in table.records:
@@ -185,6 +209,10 @@ from(bucket: "{INFLUX_BUCKET}")
                     battery_series.append({"time": ts, "battery": round(float(value), 1)})
                 elif field == "current_steering":
                     steering_series.append({"time": ts, "steering": int(value)})
+                elif field == "sensor_error":
+                    sensor_total += 1
+                    if value:
+                        sensor_errors += 1
 
         duration = (
             (speed_series[-1]["time"] - speed_series[0]["time"])
@@ -197,10 +225,11 @@ from(bucket: "{INFLUX_BUCKET}")
             "battery_series":  battery_series,
             "steering_series": steering_series,
             "stats": {
-                "top_speed":     round(max(speeds),              2) if speeds else 0,
-                "average_speed": round(sum(speeds) / len(speeds), 2) if speeds else 0,
-                "data_points":   len(speeds),
-                "duration_s":    duration,
+                "top_speed":         round(max(speeds),              2) if speeds else 0,
+                "average_speed":     round(sum(speeds) / len(speeds), 2) if speeds else 0,
+                "data_points":       len(speeds),
+                "duration_s":        duration,
+                "sensor_error_rate": round(sensor_errors / sensor_total * 100, 1) if sensor_total else 0,
             },
         }
     except Exception as e:
@@ -215,10 +244,10 @@ def get_race_summary() -> dict[str, Any]:
     speeds       = [t["speed"] for t in _telemetry_buffer if "speed" in t]
     recent       = _telemetry_buffer[-20:] if _telemetry_buffer else []
     return {
-        "lap_times":         [12.4, 12.1, 11.9, 12.3, 11.7],
+        "lap_times":         [],
         "top_speed":         round(max(speeds),              2) if speeds else 0,
         "average_speed":     round(sum(speeds) / len(speeds), 2) if speeds else 0,
-        "sensor_error_rate": 1.8,
+        "sensor_error_rate": _sensor_error_rate(_telemetry_buffer),
         "packet_count":      packet_count,
         "speed_series":      [{"time": i, "speed": t["speed"]}              for i, t in enumerate(recent)],
         "battery_series":    [{"time": i, "battery": t["battery_percentage"]} for i, t in enumerate(recent)],

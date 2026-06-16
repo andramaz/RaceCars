@@ -545,6 +545,7 @@ function HistoryTab({
                   <KpiCard label="Avg Speed"    value={sessionData.stats?.average_speed ?? '—'} unit="m/s" />
                   <KpiCard label="Duration"     value={fmtDuration(sessionData.stats?.duration_s)} />
                   <KpiCard label="Data Points"  value={sessionData.stats?.data_points ?? '—'} />
+                  <KpiCard label="Sensor Errors" value={sessionData.stats?.sensor_error_rate != null ? `${sessionData.stats.sensor_error_rate}%` : '—'} color={sessionData.stats?.sensor_error_rate > 5 ? C.danger : C.success} />
                 </div>
 
                 {/* Speed chart */}
