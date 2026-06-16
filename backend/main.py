@@ -28,6 +28,7 @@ from database import (
     INFLUX_ENABLED,
 )
 import esp32_client
+from lap_timer import lap_timer
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -188,6 +189,9 @@ async def generate_telemetry() -> dict:
             car.emergency_stop = False
 
         print(f"[ESP32] Telemetry OK — mstate={mstate}  servoUs={servo_us}  steer={car.steering}%  escUs={esc_us}  thr={car.throttle}%")
+
+        # Lap detection — check sonar gate each tick
+        lap_timer.check(t.get("sonar"))
     else:
         # Simulated fallback — ESP32 not connected yet
         t = {}
@@ -221,6 +225,9 @@ async def generate_telemetry() -> dict:
         "fail_safe":          car.fail_safe,
         "mode":               car.mode,
         "motor_state":        esp32_system.get("mstate", "UNKNOWN"),
+        "lap_count":          lap_timer.lap_count,
+        "last_lap_s":         lap_timer.last_lap,
+        "best_lap_s":         lap_timer.best_lap,
     }
 
     # Attach real sensor data from ESP32 if available
@@ -245,6 +252,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     - Sends a telemetry snapshot every 500 ms on a background task.
     """
     await websocket.accept()
+    lap_timer.reset()
     session_id = new_session()
     print(f"[WS] App connected — session {session_id}")
 

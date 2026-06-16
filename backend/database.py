@@ -240,11 +240,12 @@ from(bucket: "{INFLUX_BUCKET}")
 # ── Legacy helper (used by /api/race-summary) ──────────────────────────────
 
 def get_race_summary() -> dict[str, Any]:
+    from lap_timer import lap_timer  # import here to avoid circular import
     packet_count = len(_telemetry_buffer)
     speeds       = [t["speed"] for t in _telemetry_buffer if "speed" in t]
     recent       = _telemetry_buffer[-20:] if _telemetry_buffer else []
     return {
-        "lap_times":         [],
+        "lap_times":         lap_timer.laps,
         "top_speed":         round(max(speeds),              2) if speeds else 0,
         "average_speed":     round(sum(speeds) / len(speeds), 2) if speeds else 0,
         "sensor_error_rate": _sensor_error_rate(_telemetry_buffer),

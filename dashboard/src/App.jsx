@@ -275,6 +275,9 @@ export default function App() {
           <KpiCard label="Fail-Safe"      value={t ? (t.fail_safe ? 'ACTIVE' : 'OFF') : '—'}
             color={t?.fail_safe ? C.warning : C.success} />
           <KpiCard label="Motor State"    value={t?.motor_state ?? '—'} color={motorColor} />
+          <KpiCard label="Laps"           value={t?.lap_count ?? '—'} color={C.primary} />
+          <KpiCard label="Last Lap"       value={t?.last_lap_s != null ? `${t.last_lap_s}s` : '—'} />
+          <KpiCard label="Best Lap"       value={t?.best_lap_s != null ? `${t.best_lap_s}s` : '—'} color={C.success} />
         </div>
 
         {/* ── Live charts ────────────────────────────────────────────────── */}
