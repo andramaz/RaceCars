@@ -113,6 +113,15 @@ async def process_command(data: dict) -> None:
         car.last_command_time = time.time()
         print("[EMERGENCY STOP] Reset — commands accepted again.")
 
+    elif msg_type == "arm":
+        print("[ARM] Arming motors.")
+        await esp32_client.send_arm(True)
+
+    elif msg_type == "disarm":
+        car.throttle = 0
+        print("[DISARM] Disarming motors.")
+        await esp32_client.send_arm(False)
+
     else:
         print(f"[UNKNOWN MSG TYPE] {msg_type}")
 

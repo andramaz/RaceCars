@@ -140,10 +140,10 @@ export default function ManualControlScreen() {
 
   // ── Emergency ─────────────────────────────────────────────────────────────
 
-  const onEmergencyStop = () =>
-    sendCommand({ type: 'emergency_stop',       timestamp: Math.floor(Date.now() / 1000) });
-  const onResetEmergency = () =>
-    sendCommand({ type: 'reset_emergency_stop', timestamp: Math.floor(Date.now() / 1000) });
+  const onArm     = () => sendCommand({ type: 'arm',                 timestamp: Math.floor(Date.now() / 1000) });
+  const onDisarm  = () => sendCommand({ type: 'disarm',              timestamp: Math.floor(Date.now() / 1000) });
+  const onEmergencyStop  = () => sendCommand({ type: 'emergency_stop',       timestamp: Math.floor(Date.now() / 1000) });
+  const onResetEmergency = () => sendCommand({ type: 'reset_emergency_stop', timestamp: Math.floor(Date.now() / 1000) });
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -179,6 +179,35 @@ export default function ManualControlScreen() {
             thumbColor={colors.white}
           />
           <Text style={[styles.modeLabel, isAutonomous && styles.modeActive]}>Autonomous</Text>
+        </View>
+
+        {/* ARM / DISARM */}
+        <View style={styles.armRow}>
+          <TouchableOpacity
+            style={[styles.armBtn, !connected && styles.armBtnDisabled]}
+            onPress={onArm}
+            disabled={!connected}
+            activeOpacity={0.75}
+          >
+            <Text style={styles.armBtnText}>ARM</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.disarmBtn, !connected && styles.armBtnDisabled]}
+            onPress={onDisarm}
+            disabled={!connected}
+            activeOpacity={0.75}
+          >
+            <Text style={styles.disarmBtnText}>DISARM</Text>
+          </TouchableOpacity>
+          {telemetry?.motor_state && (
+            <View style={[
+              styles.motorBadge,
+              telemetry.motor_state === 'ARMED'     && styles.motorArmed,
+              telemetry.motor_state === 'EMERGENCY' && styles.motorEmergency,
+            ]}>
+              <Text style={styles.motorBadgeText}>{telemetry.motor_state}</Text>
+            </View>
+          )}
         </View>
       </View>
 
@@ -325,6 +354,17 @@ const styles = StyleSheet.create({
   modeRow:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.md },
   modeLabel: { fontSize: 13, color: colors.textMuted, fontWeight: '500' },
   modeActive:{ color: colors.primary },
+
+  armRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, marginTop: spacing.xs },
+  armBtn: { paddingVertical: 6, paddingHorizontal: spacing.md, borderRadius: 8, backgroundColor: colors.success },
+  disarmBtn: { paddingVertical: 6, paddingHorizontal: spacing.md, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  armBtnDisabled: { opacity: 0.35 },
+  armBtnText:    { color: '#000', fontWeight: '700', fontSize: 13 },
+  disarmBtnText: { color: colors.textMuted, fontWeight: '700', fontSize: 13 },
+  motorBadge: { paddingVertical: 4, paddingHorizontal: spacing.sm, borderRadius: 99, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  motorArmed:     { borderColor: colors.success, backgroundColor: colors.success + '22' },
+  motorEmergency: { borderColor: colors.danger,  backgroundColor: colors.danger  + '22' },
+  motorBadgeText: { fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 1 },
 
   joyArea: { flex: 1, alignItems: 'center', justifyContent: 'center', position: 'relative' },
 
