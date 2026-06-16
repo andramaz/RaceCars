@@ -75,19 +75,22 @@ def servo_us_to_pct(servo_us: int) -> int:
         return round((servo_us - mid) / span * 100) if span else 0
 
 def esc_us_to_pct(esc_us: int) -> int:
-    """Convert raw ESC µs back to throttle percentage (0..100)."""
+    """Convert raw ESC µs to throttle percentage (-100..+100). Negative = reverse."""
     mid = esc_config["neutralUs"]
-    max_us = esc_config["maxUs"]
-    span = max_us - mid
-    if span <= 0:
-        return 0
-    pct = round((esc_us - mid) / span * 100)
-    return max(0, min(100, pct))
+    if esc_us >= mid:
+        span = esc_config["maxUs"] - mid
+        return max(0, min(100, round((esc_us - mid) / span * 100))) if span else 0
+    else:
+        span = mid - esc_config["minUs"]
+        return max(-100, min(0, round((esc_us - mid) / span * 100))) if span else 0
 
 def _throttle_to_us(pct: int) -> int:
-    """Convert throttle percentage (0..100) to ESC µs using live config."""
+    """Convert throttle percentage (-100..+100) to ESC µs. Negative = reverse."""
     mid = esc_config["neutralUs"]
-    return int(mid + (pct / 100) * (esc_config["maxUs"] - mid))
+    if pct >= 0:
+        return int(mid + (pct / 100) * (esc_config["maxUs"] - mid))
+    else:
+        return int(mid + (pct / 100) * (mid - esc_config["minUs"]))
 
 # ---------------------------------------------------------------------------
 # Drive command

@@ -1,33 +1,24 @@
 /**
  * ManualControlScreen.js
  *
- * Steering: horizontal drag-and-snap joystick (PanResponder + Animated).
- *   - Drag left/right to steer (-100 … +100).
- *   - Release → knob springs back to center, steering resets to 0.
- *   - Releasing steering does NOT change throttle.
+ * 2D joystick — same axes as the ESP32 web UI:
+ *   X (left/right) → steering  (-100 … +100)
+ *   Y (up/down)    → throttle  (+100 = forward, -100 = reverse)
  *
- * Throttle: unchanged slider (0 … 100), does NOT reset on release.
- * Emergency stop: unchanged.
+ * On release the knob springs back to center and throttle+steering reset to 0.
  */
 
 import React, { useState, useRef } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  Switch,
-  PanResponder,
-  Animated,
+  View, Text, TouchableOpacity, StyleSheet,
+  ScrollView, Switch, PanResponder, Animated,
 } from 'react-native';
-import Slider from '@react-native-community/slider';
 import { useApp } from '../context/AppContext';
 import { colors, spacing, card } from '../styles/theme';
 
-// Joystick dimensions
-const KNOB_SIZE   = 56;   // diameter of the draggable knob
-const TRACK_H     = 76;   // height of the joystick track bar
+const OUTER = 260;          // outer circle diameter (px)
+const KNOB  = 64;           // knob diameter (px)
+const R     = (OUTER - KNOB) / 2;  // max travel radius from centre
 
 export default function ManualControlScreen() {
   const { connected, sendCommand, telemetry } = useApp();
@@ -38,30 +29,15 @@ export default function ManualControlScreen() {
 
   const isEmergencyActive = telemetry?.emergency_stop ?? false;
 
-  // ── Refs ─────────────────────────────────────────────────────────────────
-  // Using refs (not state) inside PanResponder callbacks avoids stale closures.
-
-  const throttleRef      = useRef(0);
-  const steeringRef      = useRef(0);
-  const trackWidthRef    = useRef(0);   // actual rendered track width (set on layout)
-  const maxOffsetRef     = useRef(0);   // max pixels the knob can travel from center
-   // knob offset at gesture start
-
-  // Updated every render so panResponder always sees the current disabled state.
+  const steeringRef = useRef(0);
+  const throttleRef = useRef(0);
   const disabledRef = useRef(false);
   disabledRef.current = !connected || isAutonomous || isEmergencyActive;
 
-  // Animated X position of the knob (0 = center).
   const knobX = useRef(new Animated.Value(0)).current;
+  const knobY = useRef(new Animated.Value(0)).current;
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
-
-  const offsetToSteering = (offset) => {
-    const max = maxOffsetRef.current;
-    return max === 0 ? 0 : Math.round((offset / max) * 100);
-  };
+  // ── Helpers ────────────────────────────────────────────────────────────────
 
   const sendDrive = (s, t) => {
     if (!connected || isAutonomous) return;
@@ -74,70 +50,55 @@ export default function ManualControlScreen() {
     });
   };
 
-  // ── Throttle slider ───────────────────────────────────────────────────────
-
-  const onThrottleChange = (v) => {
-    setThrottle(v);
-    throttleRef.current = v;
-    sendDrive(steeringRef.current, v);
-  };
-
-  // ── Steering joystick ─────────────────────────────────────────────────────
-
-  // Called when the track View is first laid out so we know its pixel width.
-  const onTrackLayout = (e) => {
-    const w = e.nativeEvent.layout.width;
-    trackWidthRef.current = w;
-    maxOffsetRef.current  = (w - KNOB_SIZE) / 2 - 4; // 4px padding from each edge
-  };
-
   const snapToCenter = () => {
-    Animated.spring(knobX, {
-      toValue:         0,
-      useNativeDriver: true,
-      tension:         180,
-      friction:        10,
-    }).start();
+    Animated.spring(knobX, { toValue: 0, useNativeDriver: true, tension: 180, friction: 10 }).start();
+    Animated.spring(knobY, { toValue: 0, useNativeDriver: true, tension: 180, friction: 10 }).start();
     setSteering(0);
+    setThrottle(0);
     steeringRef.current = 0;
-    // Keep throttle as-is — only reset steering.
-    sendDrive(0, throttleRef.current);
+    throttleRef.current = 0;
+    sendDrive(0, 0);
   };
 
-  // PanResponder lives in a ref so it is created once and never recreated.
-  // All mutable values it reads come from refs, so no stale-closure issues.
+  // ── PanResponder ───────────────────────────────────────────────────────────
+
   const panResponder = useRef(
     PanResponder.create({
-
       onStartShouldSetPanResponder: () => !disabledRef.current,
       onMoveShouldSetPanResponder:  () => !disabledRef.current,
 
       onPanResponderGrant: () => {
-        // Stop any in-flight spring. Knob stays at center — no jump to touch position.
         knobX.stopAnimation();
+        knobY.stopAnimation();
       },
 
-      onPanResponderMove: (_, gesture) => {
-        // Use ONLY gesture.dx — how far the finger has moved since touch-down.
-        // This means a tap produces 0 movement and steering stays at 0.
-        const max     = maxOffsetRef.current;
-        const clamped = Math.max(-max, Math.min(max, gesture.dx));
+      onPanResponderMove: (_, g) => {
+        // Clamp to circle
+        const dist  = Math.sqrt(g.dx * g.dx + g.dy * g.dy);
+        const scale = dist > R ? R / dist : 1;
+        const cx    = g.dx * scale;
+        const cy    = g.dy * scale;
 
-        knobX.setValue(clamped);
+        knobX.setValue(cx);
+        knobY.setValue(cy);
 
-        const value = Math.round((clamped / max) * 100);
-        setSteering(value);
-        steeringRef.current = value;
-        sendDrive(value, throttleRef.current);
+        // Y is inverted: drag up → dy negative → positive throttle
+        const s = Math.round((cx / R) * 100);
+        const t = Math.round((-cy / R) * 100);
+
+        setSteering(s);
+        setThrottle(t);
+        steeringRef.current = s;
+        throttleRef.current = t;
+        sendDrive(s, t);
       },
 
       onPanResponderRelease:   () => snapToCenter(),
-      // Also snap if another gesture steals the responder (e.g. scroll view).
       onPanResponderTerminate: () => snapToCenter(),
     })
   ).current;
 
-  // ── Emergency stop helpers ────────────────────────────────────────────────
+  // ── Emergency stop helpers ─────────────────────────────────────────────────
 
   const onEmergencyStop = () =>
     sendCommand({ type: 'emergency_stop',       timestamp: Math.floor(Date.now() / 1000) });
@@ -145,15 +106,18 @@ export default function ManualControlScreen() {
   const onResetEmergency = () =>
     sendCommand({ type: 'reset_emergency_stop', timestamp: Math.floor(Date.now() / 1000) });
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Derived colours ────────────────────────────────────────────────────────
 
   const joystickDisabled = !connected || isAutonomous || isEmergencyActive;
+  const thrColor = throttle > 0 ? colors.success : throttle < 0 ? colors.danger : colors.textMuted;
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.scroll}>
       <Text style={styles.title}>Manual Control</Text>
 
-      {/* ── Banners ───────────────────────────────────────────────── */}
+      {/* ── Banners ─────────────────────────────────────────────── */}
       {!connected && (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>
@@ -169,7 +133,7 @@ export default function ManualControlScreen() {
         </View>
       )}
 
-      {/* ── Mode switch ───────────────────────────────────────────── */}
+      {/* ── Mode switch ─────────────────────────────────────────── */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Drive Mode</Text>
         <View style={styles.switchRow}>
@@ -187,98 +151,70 @@ export default function ManualControlScreen() {
         )}
       </View>
 
-      {/* ── Steering joystick ─────────────────────────────────────── */}
+      {/* ── 2D Joystick ─────────────────────────────────────────── */}
       <View style={styles.card}>
-        {/* Header row */}
-        <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>Steering</Text>
-          <Text style={[
-            styles.bigValue,
-            { color: steering === 0 ? colors.textMuted : colors.primary },
-          ]}>
-            {steering > 0 ? '+' : ''}{steering}
-          </Text>
-        </View>
+        <Text style={styles.cardTitle}>Drive Joystick</Text>
 
-        {/* Joystick track */}
-        <View
-          style={[styles.track, joystickDisabled && styles.trackDisabled]}
-          onLayout={onTrackLayout}
-          {...(!joystickDisabled ? panResponder.panHandlers : {})}
-        >
-          {/* Left-zone tint */}
-          <View style={[styles.zoneTint, styles.zoneTintLeft,
-            { opacity: steering < 0 ? Math.abs(steering) / 100 * 0.5 : 0 }]}
-          />
-          {/* Right-zone tint */}
-          <View style={[styles.zoneTint, styles.zoneTintRight,
-            { opacity: steering > 0 ? steering / 100 * 0.5 : 0 }]}
-          />
+        {/* Forward label */}
+        <Text style={[styles.dirLabel, styles.dirTop, throttle > 10 && styles.dirActive]}>
+          ▲  Forward
+        </Text>
 
-          {/* Center tick */}
-          <View style={styles.centerTick} />
+        {/* Middle row: Left — circle — Right */}
+        <View style={styles.joyRow}>
+          <Text style={[styles.dirLabel, steering < -10 && styles.dirActive]}>◀</Text>
 
-          {/* Draggable knob */}
-          <Animated.View
-            style={[
-              styles.knob,
-              { transform: [{ translateX: knobX }] },
-              joystickDisabled && styles.knobDisabled,
-              steering !== 0 && styles.knobActive,
-            ]}
+          <View
+            style={[styles.outerCircle, joystickDisabled && styles.outerDisabled]}
+            {...(!joystickDisabled ? panResponder.panHandlers : {})}
           >
-            {/* Inner dot */}
-            <View style={styles.knobDot} />
-          </Animated.View>
+            {/* Crosshair */}
+            <View style={styles.crossH} />
+            <View style={styles.crossV} />
+
+            {/* Knob */}
+            <Animated.View
+              style={[
+                styles.knob,
+                { transform: [{ translateX: knobX }, { translateY: knobY }] },
+                (steering !== 0 || throttle !== 0) && styles.knobActive,
+              ]}
+            />
+          </View>
+
+          <Text style={[styles.dirLabel, steering > 10 && styles.dirActive]}>▶</Text>
         </View>
 
-        {/* Direction labels */}
-        <View style={styles.rowBetween}>
-          <Text style={[styles.dirLabel, steering < -10 && { color: colors.primary }]}>
-            ◀ Left
-          </Text>
-          <Text style={styles.dirLabelCenter}>Center</Text>
-          <Text style={[styles.dirLabel, steering > 10 && { color: colors.primary }]}>
-            Right ▶
-          </Text>
+        {/* Reverse label */}
+        <Text style={[styles.dirLabel, styles.dirBottom, throttle < -10 && styles.dirDanger]}>
+          ▼  Reverse
+        </Text>
+
+        {/* Values */}
+        <View style={styles.valRow}>
+          <View style={styles.valBox}>
+            <Text style={styles.valLabel}>Steering</Text>
+            <Text style={[styles.valNum, { color: colors.primary }]}>
+              {steering > 0 ? '+' : ''}{steering}
+            </Text>
+          </View>
+          <View style={styles.valBox}>
+            <Text style={styles.valLabel}>Throttle</Text>
+            <Text style={[styles.valNum, { color: thrColor }]}>
+              {throttle > 0 ? '+' : ''}{throttle}
+            </Text>
+          </View>
         </View>
 
-        <Text style={styles.joystickHint}>
-          Drag left or right · releases automatically to center
+        <Text style={styles.hint}>
+          Drag to steer &amp; accelerate · Release → stops
         </Text>
       </View>
 
-      {/* ── Throttle slider ───────────────────────────────────────── */}
-      <View style={styles.card}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>Throttle</Text>
-          <Text style={[styles.bigValue, { color: colors.success }]}>
-            {Math.round(throttle)}
-          </Text>
-        </View>
-        <Text style={styles.hint}>Stop → Full Speed</Text>
-        <Slider
-          style={styles.slider}
-          minimumValue={0}
-          maximumValue={100}
-          value={throttle}
-          onValueChange={onThrottleChange}
-          minimumTrackTintColor={colors.success}
-          maximumTrackTintColor={colors.border}
-          thumbTintColor={colors.success}
-          disabled={!connected || isAutonomous || isEmergencyActive}
-        />
-        <View style={styles.rowBetween}>
-          <Text style={styles.tick}>0</Text>
-          <Text style={styles.tick}>50</Text>
-          <Text style={styles.tick}>100</Text>
-        </View>
-      </View>
-
-      {/* ── Live feedback ─────────────────────────────────────────── */}
+      {/* ── Live feedback ───────────────────────────────────────── */}
       {telemetry && (
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Car Feedback (from telemetry)</Text>
+          <Text style={styles.cardTitle}>Car Feedback</Text>
           <View style={styles.feedbackRow}>
             <View style={styles.feedbackItem}>
               <Text style={styles.feedbackLabel}>Steering</Text>
@@ -296,7 +232,7 @@ export default function ManualControlScreen() {
         </View>
       )}
 
-      {/* ── Emergency stop ────────────────────────────────────────── */}
+      {/* ── Emergency stop ──────────────────────────────────────── */}
       <TouchableOpacity
         style={[styles.eStopBtn, isEmergencyActive && styles.eStopActive]}
         onPress={onEmergencyStop}
@@ -323,91 +259,73 @@ export default function ManualControlScreen() {
   );
 }
 
-// ── Styles ──────────────────────────────────────────────────────────────────
+// ── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   root:   { flex: 1, backgroundColor: colors.background },
   scroll: { padding: spacing.md },
   title:  { fontSize: 24, fontWeight: 'bold', color: colors.text, marginBottom: spacing.md },
 
-  // Banners
   banner: {
-    borderRadius:    8,
-    padding:         spacing.sm,
-    marginBottom:    spacing.sm,
-    borderWidth:     1,
-    borderColor:     colors.warning,
-    backgroundColor: colors.warning + '22',
+    borderRadius: 8, padding: spacing.sm, marginBottom: spacing.sm,
+    borderWidth: 1, borderColor: colors.warning, backgroundColor: colors.warning + '22',
   },
   bannerDanger: { borderColor: colors.danger, backgroundColor: colors.danger + '22' },
   bannerText:   { color: colors.warning, fontSize: 13, textAlign: 'center' },
 
-  // Cards / shared
-  card:         { ...card },
-  cardTitle:    { fontSize: 15, fontWeight: '600', color: colors.text },
-  rowBetween:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.xs },
-  bigValue:     { fontSize: 28, fontWeight: 'bold', color: colors.primary },
+  card:      { ...card },
+  cardTitle: { fontSize: 15, fontWeight: '600', color: colors.text, marginBottom: spacing.sm },
 
-  // Mode switch
-  switchRow:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.md, marginTop: spacing.sm },
-  modeLabel:  { fontSize: 14, color: colors.textMuted, fontWeight: '500' },
-  modeActive: { color: colors.primary },
-  modeNote:   { fontSize: 12, color: colors.textMuted, textAlign: 'center', marginTop: spacing.xs },
+  switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.md },
+  modeLabel: { fontSize: 14, color: colors.textMuted, fontWeight: '500' },
+  modeActive:{ color: colors.primary },
+  modeNote:  { fontSize: 12, color: colors.textMuted, textAlign: 'center', marginTop: spacing.xs },
 
-  // ── Joystick track ───────────────────────────────────────────────────────
-  track: {
-    width:           '100%',
-    height:          TRACK_H,
-    borderRadius:    TRACK_H / 2,
-    backgroundColor: colors.surfaceAlt,
-    borderWidth:     1,
-    borderColor:     colors.border,
-    alignItems:      'center',
-    justifyContent:  'center',
-    overflow:        'hidden',   // clip the tint views
-    marginVertical:  spacing.sm,
-    position:        'relative',
-  },
-  trackDisabled: {
-    opacity: 0.4,
+  // ── Joystick ──────────────────────────────────────────────────────────────
+  joyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
   },
 
-  // Tinted left/right zones that brighten as the knob moves outward
-  zoneTint: {
-    position:        'absolute',
-    top:             0,
-    bottom:          0,
-    width:           '50%',
-    backgroundColor: colors.primary,
-  },
-  zoneTintLeft:  { left: 0 },
-  zoneTintRight: { right: 0 },
-
-  // Subtle center tick mark
-  centerTick: {
-    position:        'absolute',
-    width:           2,
-    height:          '40%',
-    borderRadius:    1,
-    backgroundColor: colors.border,
-    // centered horizontally via self-positioning inside alignItems:'center'
-  },
-
-  // Draggable knob
-  knob: {
-    position:        'absolute',
-    width:           KNOB_SIZE,
-    height:          KNOB_SIZE,
-    borderRadius:    KNOB_SIZE / 2,
+  outerCircle: {
+    width:           OUTER,
+    height:          OUTER,
+    borderRadius:    OUTER / 2,
     backgroundColor: colors.surfaceAlt,
     borderWidth:     2,
     borderColor:     colors.border,
     alignItems:      'center',
     justifyContent:  'center',
-    // shadow
+    overflow:        'hidden',
+  },
+  outerDisabled: { opacity: 0.35 },
+
+  crossH: {
+    position:        'absolute',
+    width:           '100%',
+    height:          1,
+    backgroundColor: colors.border,
+  },
+  crossV: {
+    position:        'absolute',
+    width:           1,
+    height:          '100%',
+    backgroundColor: colors.border,
+  },
+
+  knob: {
+    position:        'absolute',
+    width:           KNOB,
+    height:          KNOB,
+    borderRadius:    KNOB / 2,
+    backgroundColor: colors.surfaceAlt,
+    borderWidth:     2,
+    borderColor:     colors.border,
     shadowColor:     '#000',
     shadowOffset:    { width: 0, height: 2 },
-    shadowOpacity:   0.4,
+    shadowOpacity:   0.5,
     shadowRadius:    4,
     elevation:       6,
   },
@@ -415,67 +333,49 @@ const styles = StyleSheet.create({
     borderColor:     colors.primary,
     backgroundColor: colors.primaryDark,
   },
-  knobDisabled: {
-    borderColor: colors.border,
-  },
-  knobDot: {
-    width:           12,
-    height:          12,
-    borderRadius:    6,
-    backgroundColor: colors.textMuted,
-  },
 
-  // Labels under joystick
   dirLabel: {
-    fontSize:   12,
-    color:      colors.textMuted,
-    fontWeight: '500',
+    fontSize: 13, fontWeight: '600', color: colors.textMuted, textAlign: 'center',
   },
-  dirLabelCenter: {
-    fontSize: 11,
-    color:    colors.border,
+  dirTop:    { marginBottom: spacing.xs },
+  dirBottom: { marginTop: spacing.xs },
+  dirActive: { color: colors.primary },
+  dirDanger: { color: colors.danger },
+
+  valRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: spacing.md,
   },
-  joystickHint: {
-    fontSize:   11,
-    color:      colors.textMuted,
-    textAlign:  'center',
-    marginTop:  spacing.xs,
+  valBox: { alignItems: 'center' },
+  valLabel: { fontSize: 11, color: colors.textMuted, marginBottom: 2 },
+  valNum:   { fontSize: 28, fontWeight: 'bold', fontVariant: ['tabular-nums'] },
+
+  hint: {
+    fontSize: 11, color: colors.textMuted, textAlign: 'center', marginTop: spacing.sm,
   },
 
-  // Throttle slider
-  hint:   { fontSize: 11, color: colors.textMuted, marginBottom: spacing.xs },
-  slider: { width: '100%', height: 40 },
-  tick:   { fontSize: 11, color: colors.textMuted },
-
-  // Telemetry feedback
+  // ── Feedback ──────────────────────────────────────────────────────────────
   feedbackRow:   { flexDirection: 'row', justifyContent: 'space-around', marginTop: spacing.xs },
   feedbackItem:  { alignItems: 'center' },
   feedbackLabel: { fontSize: 12, color: colors.textMuted },
   feedbackValue: { fontSize: 18, fontWeight: 'bold', color: colors.text },
 
-  // Emergency stop
+  // ── Emergency stop ────────────────────────────────────────────────────────
   eStopBtn: {
     backgroundColor: colors.danger,
-    borderRadius:    12,
-    padding:         spacing.lg,
-    alignItems:      'center',
-    marginBottom:    spacing.sm,
+    borderRadius: 12, padding: spacing.lg,
+    alignItems: 'center', marginBottom: spacing.sm,
   },
   eStopActive: {
-    backgroundColor: '#7d1f1f',
-    borderWidth:     2,
-    borderColor:     colors.danger,
+    backgroundColor: '#7d1f1f', borderWidth: 2, borderColor: colors.danger,
   },
   eStopText: { color: colors.white, fontSize: 18, fontWeight: 'bold' },
 
   resetBtn: {
-    borderRadius:    10,
-    padding:         spacing.md,
-    alignItems:      'center',
-    marginBottom:    spacing.lg,
-    borderWidth:     1,
-    borderColor:     colors.success,
-    backgroundColor: colors.surfaceAlt,
+    borderRadius: 10, padding: spacing.md, alignItems: 'center',
+    marginBottom: spacing.lg, borderWidth: 1,
+    borderColor: colors.success, backgroundColor: colors.surfaceAlt,
   },
   resetDisabled: { borderColor: colors.border, opacity: 0.4 },
   resetText:     { color: colors.success, fontSize: 14, fontWeight: '600' },
