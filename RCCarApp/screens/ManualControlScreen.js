@@ -25,16 +25,22 @@ const R     = (OUTER - KNOB) / 2;
 export default function ManualControlScreen() {
   const { connected, sendCommand, telemetry } = useApp();
 
-  const [steering,     setSteering]     = useState(0);
-  const [throttle,     setThrottle]     = useState(0);
-  const [isAutonomous, setIsAutonomous] = useState(false);
+  const [steering,       setSteering]       = useState(0);
+  const [throttle,       setThrottle]       = useState(0);
+  const [isAutonomous,   setIsAutonomous]   = useState(false);
+  const [throttleLocked, setThrottleLocked] = useState(false);
+  const [lockedThrottle, setLockedThrottle] = useState(0);
 
   const isEmergencyActive = telemetry?.emergency_stop ?? false;
 
-  const steeringRef = useRef(0);
-  const throttleRef = useRef(0);
-  const disabledRef = useRef(false);
-  disabledRef.current = !connected || isAutonomous || isEmergencyActive;
+  const steeringRef      = useRef(0);
+  const throttleRef      = useRef(0);
+  const throttleLockedRef= useRef(false);
+  const lockedThrottleRef= useRef(0);
+  const disabledRef      = useRef(false);
+  disabledRef.current      = !connected || isAutonomous || isEmergencyActive;
+  throttleLockedRef.current = throttleLocked;
+  lockedThrottleRef.current = lockedThrottle;
 
   const knobX = useRef(new Animated.Value(0)).current;
   const knobY = useRef(new Animated.Value(0)).current;
@@ -56,10 +62,35 @@ export default function ManualControlScreen() {
     Animated.spring(knobX, { toValue: 0, useNativeDriver: true, tension: 200, friction: 12 }).start();
     Animated.spring(knobY, { toValue: 0, useNativeDriver: true, tension: 200, friction: 12 }).start();
     setSteering(0);
-    setThrottle(0);
     steeringRef.current = 0;
-    throttleRef.current = 0;
-    sendDrive(0, 0);
+
+    if (throttleLockedRef.current) {
+      // Keep locked throttle, only snap steering
+      const t = lockedThrottleRef.current;
+      setThrottle(t);
+      throttleRef.current = t;
+      sendDrive(0, t);
+    } else {
+      setThrottle(0);
+      throttleRef.current = 0;
+      sendDrive(0, 0);
+    }
+  };
+
+  const toggleThrottleLock = () => {
+    if (throttleLocked) {
+      // Unlock: reset throttle to 0
+      setThrottleLocked(false);
+      setLockedThrottle(0);
+      setThrottle(0);
+      throttleRef.current = 0;
+      sendDrive(steeringRef.current, 0);
+    } else {
+      // Lock at current throttle value
+      const t = throttleRef.current;
+      setThrottleLocked(true);
+      setLockedThrottle(t);
+    }
   };
 
   // ── PanResponder ─────────────────────────────────────────────────────────────
@@ -203,7 +234,21 @@ export default function ManualControlScreen() {
           )}
         </View>
 
-        <Text style={styles.hint}>Hold &amp; drag · Release to stop</Text>
+        {/* Throttle lock */}
+        <TouchableOpacity
+          style={[styles.lockBtn, throttleLocked && styles.lockBtnActive]}
+          onPress={toggleThrottleLock}
+          disabled={joystickDisabled}
+          activeOpacity={0.75}
+        >
+          <Text style={[styles.lockText, throttleLocked && styles.lockTextActive]}>
+            {throttleLocked ? `🔒  Throttle Locked at ${lockedThrottle > 0 ? '+' : ''}${lockedThrottle}` : '🔓  Lock Throttle'}
+          </Text>
+        </TouchableOpacity>
+
+        <Text style={styles.hint}>
+          {throttleLocked ? 'Steer freely · Tap lock to release' : 'Hold & drag · Release to stop'}
+        </Text>
       </View>
 
       {/* ── Bottom: emergency stop ───────────────────────────────── */}
@@ -334,6 +379,23 @@ const styles = StyleSheet.create({
   valLabel:{ fontSize: 10, color: colors.textMuted, letterSpacing: 1, textTransform: 'uppercase' },
   valNum:  { fontSize: 26, fontWeight: 'bold', fontVariant: ['tabular-nums'] },
   valUnit: { fontSize: 12, fontWeight: 'normal', color: colors.textMuted },
+
+  lockBtn: {
+    marginTop:       spacing.sm,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    borderRadius:    20,
+    borderWidth:     1,
+    borderColor:     colors.border,
+    backgroundColor: colors.surfaceAlt,
+    alignSelf:       'center',
+  },
+  lockBtnActive: {
+    borderColor:     colors.warning,
+    backgroundColor: colors.warning + '22',
+  },
+  lockText:       { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
+  lockTextActive: { color: colors.warning },
 
   hint: {
     fontSize: 11, color: colors.textMuted, textAlign: 'center', marginTop: spacing.xs,
