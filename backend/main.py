@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse
 from database import (
     save_telemetry, get_race_summary,
     new_session, current_session, get_sessions, get_session_data,
+    arm_session, end_session,
     INFLUX_ENABLED,
 )
 import esp32_client
@@ -59,10 +60,64 @@ class CarState:
         self.last_command_time:  float = time.time()
         self.battery_percentage: float = 100.0
         self.battery_voltage:    float = 8.4
+        # Motor state tracking for ARM-based session management
+        self.prev_mstate:        str   = ""
+        self.grace_task:         object = None  # asyncio.Task | None
 
 
 # One shared instance for the prototype (single-car, single-session).
 car = CarState()
+
+# ── ARM-based session management ───────────────────────────────────────────
+
+WALL_GRACE_SECONDS = 60  # re-arm window after wall-triggered EMERGENCY
+
+
+async def _grace_period_timer() -> None:
+    """Wait WALL_GRACE_SECONDS; if car is still not ARMED, end the session."""
+    await asyncio.sleep(WALL_GRACE_SECONDS)
+    print(f"[SESSION] Grace period expired — ending session (no re-arm within {WALL_GRACE_SECONDS}s)")
+    end_session()
+    car.grace_task = None
+
+
+def _on_motor_state_change(new_mstate: str) -> None:
+    """
+    React to motor-state transitions reported by the ESP32.
+
+    ARMED        → start (or resume) a session
+    ARMED→EMERG  → wall recovery likely; start 60 s grace period
+    ARMED→DISARM → immediate session end
+    EMERG→ARMED  → cancel grace period, resume session
+    EMERG→DISARM → cancel grace period, end session
+    """
+    prev = car.prev_mstate
+    if new_mstate == prev:
+        return  # no change
+    car.prev_mstate = new_mstate
+
+    print(f"[SESSION] Motor state: {prev!r} → {new_mstate!r}")
+
+    if new_mstate == "ARMED":
+        # Cancel any running grace period (wall re-arm)
+        if car.grace_task and not car.grace_task.done():
+            car.grace_task.cancel()
+            car.grace_task = None
+        arm_session("car_1")
+
+    elif prev == "ARMED" and new_mstate == "EMERGENCY":
+        # Wall-triggered emergency — start grace period instead of ending session
+        print(f"[SESSION] EMERGENCY detected — starting {WALL_GRACE_SECONDS}s grace period")
+        if car.grace_task and not car.grace_task.done():
+            car.grace_task.cancel()
+        car.grace_task = asyncio.create_task(_grace_period_timer())
+
+    elif new_mstate == "DISARMED":
+        # Cancel grace period if any, then end session
+        if car.grace_task and not car.grace_task.done():
+            car.grace_task.cancel()
+            car.grace_task = None
+        end_session()
 
 # ---------------------------------------------------------------------------
 # Safety / fail-safe logic
@@ -186,6 +241,9 @@ async def generate_telemetry() -> dict:
             car.emergency_stop = True
         elif mstate == "DISARMED":
             car.emergency_stop = False
+
+        # ARM-based session management
+        _on_motor_state_change(mstate)
 
         print(f"[ESP32] Telemetry OK — mstate={mstate}  servoUs={servo_us}  steer={car.steering}%  escUs={esc_us}  thr={car.throttle}%")
     else:
