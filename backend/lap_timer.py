@@ -1,20 +1,28 @@
 """
-lap_timer.py — Sonar-based lap detection.
+lap_timer.py — Lap detection (distance-based or sonar-based).
 
-Triggers a lap crossing when either sonar sensor reads below
-SONAR_THRESHOLD_CM.  A LAP_COOLDOWN_S guard prevents the same
-gate from being counted twice in quick succession.
+Distance mode (default):
+    Accumulates fake odometry (speed × dt) and counts a lap every
+    LAP_DISTANCE_M metres.  Speed is estimated from throttle %.
 
-Usage (singleton pattern):
+Sonar mode (legacy):
+    Triggers when either sonar sensor reads below SONAR_THRESHOLD_CM.
+
+Usage:
     from lap_timer import lap_timer
-    new_lap = lap_timer.check(sonar_dict)   # call each telemetry tick
-    lap_timer.reset()                        # call at session start
+    lap_timer.tick(speed_ms, dt)   # call each telemetry tick (distance mode)
+    lap_timer.check(sonar_dict)    # call each telemetry tick (sonar mode)
+    lap_timer.reset()              # call at session start
 """
 
 import time
 
-SONAR_THRESHOLD_CM = 25.0   # gate width — object closer than this triggers a crossing
-LAP_COOLDOWN_S     = 3.0    # minimum seconds between two valid crossings
+# ── Distance mode config ───────────────────────────────────────────────────
+LAP_DISTANCE_M = 1.0   # metres per lap
+
+# ── Sonar mode config (legacy) ─────────────────────────────────────────────
+SONAR_THRESHOLD_CM = 25.0
+LAP_COOLDOWN_S     = 3.0
 
 
 class LapTimer:
@@ -22,17 +30,67 @@ class LapTimer:
         self.reset()
 
     def reset(self) -> None:
-        self._lap_start: float       = 0.0
-        self._last_cross: float      = 0.0
-        self._laps:       list[float] = []
-        self._armed:      bool        = False   # True after first gate crossing
+        self._lap_start:   float       = 0.0
+        self._last_cross:  float       = 0.0
+        self._laps:        list[float] = []
+        self._armed:       bool        = False
+        self._distance_m:  float       = 0.0   # cumulative distance in current lap
+
+    # ── Distance-based tick (called from telemetry_loop every 100 ms) ──────
+
+    def tick(self, speed_ms: float, dt: float) -> float | None:
+        """
+        Accumulate distance and count a lap every LAP_DISTANCE_M metres.
+        speed_ms: current speed in m/s (estimated from throttle)
+        dt:       elapsed seconds since last tick
+        Returns completed lap duration on a new lap, otherwise None.
+        """
+        if speed_ms <= 0:
+            return None
+
+        self._distance_m += speed_ms * dt
+
+        if self._distance_m < LAP_DISTANCE_M:
+            return None
+
+        # Lap complete
+        self._distance_m -= LAP_DISTANCE_M   # carry over excess distance
+        now = time.time()
+
+        if not self._armed:
+            self._lap_start = now
+            self._armed     = True
+            print(f"[LAP] First lap started (distance mode)")
+            return None
+
+        lap_s = round(now - self._lap_start, 2)
+        self._laps.append(lap_s)
+        self._lap_start = now
+        print(f"[LAP] Lap {len(self._laps)} — {lap_s}s  ({LAP_DISTANCE_M}m)")
+        return lap_s
+
+    # ── Manual lap trigger ─────────────────────────────────────────────────
+
+    def manual_lap(self) -> float | None:
+        """
+        Called when user presses the LAP button.
+        First press starts the timer, subsequent presses record a lap.
+        """
+        now = time.time()
+        if not self._armed:
+            self._lap_start = now
+            self._armed     = True
+            print("[LAP] Manual — timer started")
+            return None
+        lap_s = round(now - self._lap_start, 2)
+        self._laps.append(lap_s)
+        self._lap_start = now
+        print(f"[LAP] Manual lap {len(self._laps)} — {lap_s}s")
+        return lap_s
+
+    # ── Sonar-based check (legacy, kept for compatibility) ──────────────────
 
     def check(self, sonar: dict | None) -> float | None:
-        """
-        Call once per telemetry tick with the sonar dict from the ESP32.
-        Returns the completed lap duration (seconds) if a lap just finished,
-        otherwise returns None.
-        """
         if not sonar:
             return None
 
@@ -46,22 +104,18 @@ class LapTimer:
         min_dist = min(distances)
 
         if min_dist >= SONAR_THRESHOLD_CM:
-            return None  # nothing near the gate
-
-        # Enforce cooldown between crossings
+            return None
         if now - self._last_cross < LAP_COOLDOWN_S:
             return None
 
         self._last_cross = now
 
         if not self._armed:
-            # First crossing: start the clock
             self._lap_start = now
             self._armed     = True
             print(f"[LAP] Gate crossed — lap timer started")
             return None
 
-        # Subsequent crossing: record the lap
         lap_s = round(now - self._lap_start, 2)
         self._laps.append(lap_s)
         self._lap_start = now
@@ -83,6 +137,10 @@ class LapTimer:
     @property
     def last_lap(self) -> float | None:
         return self._laps[-1] if self._laps else None
+
+    @property
+    def distance_m(self) -> float:
+        return round(self._distance_m, 2)
 
 
 # Module-level singleton shared by main.py and database.py

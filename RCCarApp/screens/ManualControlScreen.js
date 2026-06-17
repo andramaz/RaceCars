@@ -20,7 +20,7 @@ const KNOB  = 70;
 const R     = (OUTER - KNOB) / 2;
 
 export default function ManualControlScreen() {
-  const { connected, sendCommand, telemetry } = useApp();
+  const { connected, sendCommand, sendDirect, telemetry } = useApp();
 
   const [steering,       setSteering]       = useState(0);
   const [throttle,       setThrottle]       = useState(0);
@@ -45,13 +45,11 @@ export default function ManualControlScreen() {
   const heartbeatRef = useRef(null);  // joystick-held heartbeat
   const keepAliveRef = useRef(null);  // always-on keepalive while connected
 
-  // Keep-alive: send current position every 500ms so fail-safe never triggers
+  // Keep-alive: ping backend every 500ms so backend fail-safe stays off
   useEffect(() => {
     if (connected && !isAutonomous) {
       keepAliveRef.current = setInterval(() => {
-        const s = steeringRef.current;
-        const t = throttleLockedRef.current ? lockedThrottleRef.current : throttleRef.current;
-        sendDrive(s, t);
+        sendCommand({ type: 'keepalive', timestamp: Math.floor(Date.now() / 1000) });
       }, 500);
     } else {
       clearInterval(keepAliveRef.current);
@@ -67,13 +65,8 @@ export default function ManualControlScreen() {
 
   const sendDrive = (s, t) => {
     if (!connected || isAutonomous) return;
-    sendCommand({
-      type:      'command',
-      steering:  Math.round(s),
-      throttle:  Math.round(t),
-      mode:      'manual',
-      timestamp: Math.floor(Date.now() / 1000),
-    });
+    // Direct to ESP32 — bypasses backend for minimum latency
+    sendDirect(Math.round(s), Math.round(t));
   };
 
   // ── Snap back ─────────────────────────────────────────────────────────────
@@ -174,8 +167,15 @@ export default function ManualControlScreen() {
 
   const onArm     = () => sendCommand({ type: 'arm',                 timestamp: Math.floor(Date.now() / 1000) });
   const onDisarm  = () => sendCommand({ type: 'disarm',              timestamp: Math.floor(Date.now() / 1000) });
+  const onLap     = () => sendCommand({ type: 'lap',                 timestamp: Math.floor(Date.now() / 1000) });
   const onEmergencyStop  = () => sendCommand({ type: 'emergency_stop',       timestamp: Math.floor(Date.now() / 1000) });
   const onResetEmergency = () => sendCommand({ type: 'reset_emergency_stop', timestamp: Math.floor(Date.now() / 1000) });
+
+  const espMode       = telemetry?.system?.mode ?? null;
+  const espAutoStatus = telemetry?.system?.['auto-mode-status'] ?? null;
+
+  const onSetMode        = (mode)    => sendCommand({ type: 'set_mode',         mode,    timestamp: Math.floor(Date.now() / 1000) });
+  const onSetAutoVersion = (version) => sendCommand({ type: 'set_auto_version', version, timestamp: Math.floor(Date.now() / 1000) });
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -231,6 +231,14 @@ export default function ManualControlScreen() {
           >
             <Text style={styles.disarmBtnText}>DISARM</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.lapBtn, !connected && styles.armBtnDisabled]}
+            onPress={onLap}
+            disabled={!connected}
+            activeOpacity={0.75}
+          >
+            <Text style={styles.armBtnText}>⏱ LAP</Text>
+          </TouchableOpacity>
           {telemetry?.motor_state && (
             <View style={[
               styles.motorBadge,
@@ -242,6 +250,34 @@ export default function ManualControlScreen() {
           )}
         </View>
       </View>
+
+        {/* Run Mode */}
+        <View style={styles.modeRow}>
+          <TouchableOpacity
+            style={[styles.modeBtn, espMode === 'MANUAL' && styles.modeBtnActive]}
+            onPress={() => onSetMode('manual')} disabled={!connected}
+          >
+            <Text style={styles.modeBtnText}>MANUAL</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeBtn, espMode === 'AUTO' && styles.modeBtnGreen]}
+            onPress={() => onSetMode('auto')} disabled={!connected}
+          >
+            <Text style={styles.modeBtnText}>AUTO</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeBtn, espAutoStatus === 'single-car' && styles.modeBtnActive]}
+            onPress={() => onSetAutoVersion('single')} disabled={!connected}
+          >
+            <Text style={styles.modeBtnText}>SINGLE</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeBtn, espAutoStatus === 'multi-car' && styles.modeBtnActive]}
+            onPress={() => onSetAutoVersion('multi')} disabled={!connected}
+          >
+            <Text style={styles.modeBtnText}>MULTI</Text>
+          </TouchableOpacity>
+        </View>
 
       {/* ── Joystick ──────────────────────────────────────────────── */}
       <View style={styles.joyArea}>
@@ -389,7 +425,13 @@ const styles = StyleSheet.create({
   modeLabel: { fontSize: 13, color: colors.textMuted, fontWeight: '500' },
   modeActive:{ color: colors.primary },
 
+  modeBtn:       { paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  modeBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  modeBtnGreen:  { backgroundColor: colors.success, borderColor: colors.success },
+  modeBtnText:   { color: colors.text, fontWeight: '700', fontSize: 11 },
+
   armRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, marginTop: spacing.xs },
+  lapBtn: { paddingVertical: 6, paddingHorizontal: spacing.md, borderRadius: 8, backgroundColor: '#e65100' },
   armBtn: { paddingVertical: 6, paddingHorizontal: spacing.md, borderRadius: 8, backgroundColor: colors.success },
   disarmBtn: { paddingVertical: 6, paddingHorizontal: spacing.md, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
   armBtnDisabled: { opacity: 0.35 },

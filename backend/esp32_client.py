@@ -29,28 +29,55 @@ import httpx
 
 _raw_host = os.getenv("ESP32_HOST", "esp.local")
 
-# Resolve hostname to IP at startup.
-# Python/httpx on Windows often cannot resolve .local mDNS hostnames even when
-# the browser can. socket.gethostbyname() uses the OS resolver which usually works.
-if _raw_host and _raw_host != "":
+def _resolve_host(hostname: str) -> str:
+    """Resolve hostname to IP. Returns IP string, or original hostname on failure."""
     try:
-        _resolved = _socket.gethostbyname(_raw_host)
-        if _resolved != _raw_host:
-            print(f"[ESP32] Resolved {_raw_host} -> {_resolved}")
-        ESP32_HOST = _resolved
-    except Exception as _e:
-        print(f"[ESP32] Could not resolve '{_raw_host}': {_e} — using as-is")
-        ESP32_HOST = _raw_host
+        ip = _socket.gethostbyname(hostname)
+        if ip != hostname:
+            print(f"[ESP32] Resolved {hostname} -> {ip}")
+        return ip
+    except Exception as e:
+        print(f"[ESP32] Could not resolve '{hostname}': {e}")
+        return hostname
+
+if _raw_host:
+    ESP32_HOST = _resolve_host(_raw_host)
 else:
     ESP32_HOST = ""
 
 BASE_URL = f"http://{ESP32_HOST}:5000" if ESP32_HOST else ""
-TIMEOUT  = 2.0
 
-# Connection backoff — only retry every 5 s after a failure
+def _refresh_host() -> None:
+    """Re-resolve hostname → IP after a connection failure. Updates BASE_URL."""
+    global ESP32_HOST, BASE_URL
+    if not _raw_host:
+        return
+    new_ip = _resolve_host(_raw_host)
+    if new_ip != ESP32_HOST:
+        print(f"[ESP32] Host updated: {ESP32_HOST} -> {new_ip}")
+        ESP32_HOST = new_ip
+        BASE_URL   = f"http://{ESP32_HOST}:5000"
+DRIVE_TIMEOUT  = 0.3   # fire-and-forget — just needs to reach ESP32
+STATUS_TIMEOUT = 1.0   # needs a full response back
+
+# Connection backoff — only retry every 0.2 s after a failure
 import time as _time
 _next_attempt: float = 0.0
-RETRY_INTERVAL = 5.0
+RETRY_INTERVAL = 0.2
+
+# Persistent HTTP client — reused across calls to avoid TCP handshake overhead
+_http_client: httpx.AsyncClient | None = None
+
+def _client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient()
+    return _http_client
+
+def _reset_client() -> None:
+    """Discard the current HTTP client so next call creates a fresh one."""
+    global _http_client
+    _http_client = None
 
 # Live config — updated from ESP32 /status response (config.servo / config.esc).
 # Defaults match the ESP32 firmware defaults until first /status is received.
@@ -108,15 +135,16 @@ async def send_drive(steering: int, throttle: int) -> bool:
     steer_us = _steering_to_us(steering)
     thr_us   = _throttle_to_us(throttle)
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{BASE_URL}/control",
-                params={"steer": steer_us, "thr": thr_us},
-                timeout=TIMEOUT,
-            )
-            return r.status_code == 200
+        r = await _client().post(
+            f"{BASE_URL}/control",
+            params={"steer": steer_us, "thr": thr_us},
+            timeout=DRIVE_TIMEOUT,
+        )
+        return r.status_code == 200
     except Exception as e:
         print(f"[ESP32] send_drive failed: {e}")
+        _reset_client()
+        _refresh_host()
         return False
 
 # ---------------------------------------------------------------------------
@@ -134,17 +162,44 @@ async def send_arm(armed: bool) -> bool:
     label    = "ARM" if armed else "DISARM"
     for attempt in range(1, 4):
         try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(f"{BASE_URL}{endpoint}", timeout=TIMEOUT)
-                if r.status_code == 200:
-                    print(f"[ESP32] {label} OK (attempt {attempt})")
-                    return True
-                print(f"[ESP32] {label} attempt {attempt} → HTTP {r.status_code}")
+            r = await _client().post(f"{BASE_URL}{endpoint}", timeout=DRIVE_TIMEOUT)
+            if r.status_code == 200:
+                print(f"[ESP32] {label} OK (attempt {attempt})")
+                return True
+            print(f"[ESP32] {label} attempt {attempt} → HTTP {r.status_code}")
         except Exception as e:
             print(f"[ESP32] {label} attempt {attempt} failed: {type(e).__name__}: {e}")
         await asyncio.sleep(0.4)
     print(f"[ESP32] {label} failed after 3 attempts")
     return False
+
+# ---------------------------------------------------------------------------
+# Mode / Auto-version
+# ---------------------------------------------------------------------------
+
+async def send_mode(mode: str) -> bool:
+    """Switch ESP32 between 'auto' and 'manual' run mode."""
+    if not BASE_URL:
+        return False
+    try:
+        r = await _client().post(f"{BASE_URL}/mode", params={"mode": mode}, timeout=DRIVE_TIMEOUT)
+        print(f"[ESP32] Mode → {mode}: HTTP {r.status_code}")
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[ESP32] send_mode failed: {e}")
+        return False
+
+async def send_auto_version(version: str) -> bool:
+    """Switch autonomous mode between 'single' and 'multi' car."""
+    if not BASE_URL:
+        return False
+    try:
+        r = await _client().post(f"{BASE_URL}/auto-version", params={"version": version}, timeout=DRIVE_TIMEOUT)
+        print(f"[ESP32] Auto-version → {version}: HTTP {r.status_code}")
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[ESP32] send_auto_version failed: {e}")
+        return False
 
 # ---------------------------------------------------------------------------
 # Emergency stop
@@ -158,9 +213,8 @@ async def send_emergency() -> bool:
     if not BASE_URL:
         return False
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(f"{BASE_URL}/estop", timeout=TIMEOUT)
-            return r.status_code == 200
+        r = await _client().post(f"{BASE_URL}/estop", timeout=DRIVE_TIMEOUT)
+        return r.status_code == 200
     except Exception as e:
         print(f"[ESP32] send_emergency failed: {e}")
         return False
@@ -202,18 +256,19 @@ async def fetch_telemetry() -> dict | None:
     if now < _next_attempt:
         return None
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{BASE_URL}/status", timeout=TIMEOUT)
-            if r.status_code == 200:
-                _next_attempt = 0
-                data = r.json()
-                # Sync live servo/esc config from ESP32
-                cfg = data.get("config", {})
-                if cfg.get("servo"):
-                    servo_config.update(cfg["servo"])
-                if cfg.get("esc"):
-                    esc_config.update(cfg["esc"])
-                return data
+        r = await _client().get(f"{BASE_URL}/status", timeout=STATUS_TIMEOUT)
+        if r.status_code == 200:
+            _next_attempt = 0
+            data = r.json()
+            # Sync live servo/esc config from ESP32
+            cfg = data.get("config", {})
+            if cfg.get("servo"):
+                servo_config.update(cfg["servo"])
+            if cfg.get("esc"):
+                esc_config.update(cfg["esc"])
+            return data
     except Exception:
         _next_attempt = _time.time() + RETRY_INTERVAL
+        _reset_client()
+        _refresh_host()
     return None

@@ -63,7 +63,9 @@ class CarState:
         self.battery_voltage:    float = 8.4
         # Motor state tracking for ARM-based session management
         self.prev_mstate:        str   = ""
+        self.motor_state:        str   = "UNKNOWN"  # last known good value from ESP32
         self.grace_task:         object = None  # asyncio.Task | None
+        self.drive_task:         object = None  # asyncio.Task | None — latest in-flight send_drive
 
 
 # One shared instance for the prototype (single-car, single-session).
@@ -160,7 +162,12 @@ async def process_command(data: dict) -> None:
             f"[CMD RECEIVED] steering={car.steering:+d}  "
             f"throttle={car.throttle}  mode={car.mode}"
         )
-        await esp32_client.send_drive(car.steering, car.throttle)
+        # Only one in-flight drive request at a time.
+        # car.steering/throttle are already updated above — next completion picks them up.
+        if car.drive_task is None or car.drive_task.done():
+            car.drive_task = asyncio.create_task(
+                esp32_client.send_drive(car.steering, car.throttle)
+            )
 
     elif msg_type == "emergency_stop":
         car.emergency_stop = True
@@ -183,6 +190,21 @@ async def process_command(data: dict) -> None:
         print("[DISARM] Disarming motors.")
         await esp32_client.send_arm(False)
 
+    elif msg_type == "lap":
+        lap_timer.manual_lap()
+
+    elif msg_type == "set_mode":
+        mode = data.get("mode", "manual")
+        await esp32_client.send_mode(mode)
+
+    elif msg_type == "set_auto_version":
+        version = data.get("version", "single")
+        await esp32_client.send_auto_version(version)
+
+    elif msg_type == "keepalive":
+        car.last_command_time = time.time()
+        car.fail_safe         = False
+
     else:
         print(f"[UNKNOWN MSG TYPE] {msg_type}")
 
@@ -190,112 +212,95 @@ async def process_command(data: dict) -> None:
 # Telemetry generation (fake / simulated)
 # ---------------------------------------------------------------------------
 
-async def generate_telemetry() -> dict:
-    """
-    Build a telemetry snapshot.
-    Tries to get real sensor data from the ESP32 first.
-    Falls back to simulation if the ESP32 is not connected yet.
-    """
-    check_fail_safe()
-
+async def _poll_esp32() -> None:
+    """Fetch ESP32 data and update shared car state. Does not build a snapshot."""
     esp32_data = await esp32_client.fetch_telemetry()
-
-    if esp32_data:
-        t = esp32_data.get("telemetry", {})
-
-        # Helper: treat JSON null as a fallback value
-        def _n(v, default):
-            return v if v is not None else default
-
-        # Battery
-        battery            = t.get("battery", {})
-        battery_percentage = _n(battery.get("pct"), car.battery_percentage)
-        battery_voltage    = _n(battery.get("v"),   car.battery_voltage)
-        car.battery_percentage = battery_percentage
-        car.battery_voltage    = battery_voltage
-
-        # Signal quality from RSSI
-        rssi = t.get("wireless", {}).get("rssi", -999)
-        if rssi >= -60:
-            signal_quality = "good"
-        elif rssi >= -75:
-            signal_quality = "medium"
-        else:
-            signal_quality = "poor"
-
-        # Real steering + throttle from ESP32 control block, using live config
-        control  = t.get("control", {})
-        servo_us = _n(control.get("servoUs"), None)
-        esc_us   = _n(control.get("escUs"),   None)
-        if servo_us is not None:
-            car.steering = esp32_client.servo_us_to_pct(servo_us)
-        if esc_us is not None:
-            car.throttle = esp32_client.esc_us_to_pct(esc_us)
-
-        # Estimate speed from real throttle (no encoder yet)
-        speed = round((car.throttle / 100) * 4.0, 2)
-
-        # Sync emergency and mode from ESP32 system state
-        system = t.get("system", {})
-        mstate = system.get("mstate", "UNKNOWN")
-        if mstate == "EMERGENCY" or system.get("emergency", False):
-            car.emergency_stop = True
-        elif mstate == "DISARMED":
-            car.emergency_stop = False
-
-        # ARM-based session management
-        _on_motor_state_change(mstate)
-
-        print(f"[ESP32] Telemetry OK — mstate={mstate}  servoUs={servo_us}  steer={car.steering}%  escUs={esc_us}  thr={car.throttle}%")
-
-        # Lap detection — check sonar gate each tick
-        lap_timer.check(t.get("sonar"))
-    else:
-        # Simulated fallback — ESP32 not connected yet
-        t = {}
-        speed = max(0.0, round((car.throttle / 100) * 4.0 + random.uniform(-0.05, 0.05), 2))
+    if not esp32_data:
+        # Simulated fallback
         car.battery_percentage = max(0.0, car.battery_percentage - 0.01)
         car.battery_voltage    = round(6.0 + (car.battery_percentage / 100) * 2.4, 2)
-        battery_percentage = car.battery_percentage
-        battery_voltage    = car.battery_voltage
+        return
 
-        roll = random.random()
-        if roll > 0.90:
-            signal_quality = "poor"
-        elif roll > 0.65:
-            signal_quality = "medium"
-        else:
-            signal_quality = "good"
+    t = esp32_data.get("telemetry", {})
 
-    esp32_system = esp32_data.get("telemetry", {}).get("system", {}) if esp32_data else {}
+    def _n(v, default):
+        return v if v is not None else default
 
-    telemetry = {
+    battery = t.get("battery", {})
+    car.battery_percentage = _n(battery.get("pct"), car.battery_percentage)
+    car.battery_voltage    = _n(battery.get("v"),   car.battery_voltage)
+
+    control  = t.get("control", {})
+    servo_us = _n(control.get("servoUs"), None)
+    esc_us   = _n(control.get("escUs"),   None)
+    if servo_us is not None:
+        car.steering = esp32_client.servo_us_to_pct(servo_us)
+    if esc_us is not None:
+        car.throttle = esp32_client.esc_us_to_pct(esc_us)
+
+    system = t.get("system", {})
+    mstate = system.get("mstate", "")
+    if mstate:
+        car.motor_state = mstate
+    if mstate == "EMERGENCY" or system.get("emergency", False):
+        car.emergency_stop = True
+    elif mstate == "DISARMED":
+        car.emergency_stop = False
+
+    _on_motor_state_change(mstate or car.motor_state)
+    lap_timer.check(t.get("sonar"))
+
+    # Store raw sensor blocks for snapshot building
+    car._last_esp32_t = t
+
+
+def _build_snapshot() -> dict:
+    """Build a telemetry dict from current car state (no I/O)."""
+    t = getattr(car, "_last_esp32_t", {})
+
+    rssi = t.get("wireless", {}).get("rssi", -999) if t else -999
+    if rssi >= -60:
+        signal_quality = "good"
+    elif rssi >= -75:
+        signal_quality = "medium"
+    else:
+        signal_quality = "poor" if t else "good"
+
+    speed = round((car.throttle / 100) * 4.0, 2)
+    if not t:
+        speed = max(0.0, round(speed + random.uniform(-0.05, 0.05), 2))
+
+    snapshot = {
         "type":               "telemetry",
         "car_id":             "car_1",
         "timestamp":          int(time.time()),
         "speed":              speed,
-        "battery_percentage": round(battery_percentage, 1),
-        "battery_voltage":    battery_voltage,
+        "battery_percentage": round(car.battery_percentage, 1),
+        "battery_voltage":    car.battery_voltage,
         "current_steering":   car.steering,
         "current_throttle":   car.throttle,
         "signal_quality":     signal_quality,
         "emergency_stop":     car.emergency_stop,
         "fail_safe":          car.fail_safe,
         "mode":               car.mode,
-        "motor_state":        esp32_system.get("mstate", "UNKNOWN"),
+        "motor_state":        car.motor_state,
         "lap_count":          lap_timer.lap_count,
         "last_lap_s":         lap_timer.last_lap,
         "best_lap_s":         lap_timer.best_lap,
     }
+    for key in ("sonar", "lidar", "imu", "odometry", "control", "system", "wireless", "limits"):
+        if key in t:
+            snapshot[key] = t[key]
+    return snapshot
 
-    # Attach real sensor data from ESP32 if available
-    if esp32_data:
-        for key in ("sonar", "lidar", "imu", "odometry", "control", "system", "wireless", "limits"):
-            if key in t:
-                telemetry[key] = t[key]
 
-    save_telemetry(telemetry)
-    return telemetry
+async def generate_telemetry() -> dict:
+    """Legacy wrapper used by REST endpoints — polls ESP32 and returns snapshot."""
+    check_fail_safe()
+    await _poll_esp32()
+    snapshot = _build_snapshot()
+    save_telemetry(snapshot)
+    return snapshot
 
 # ---------------------------------------------------------------------------
 # WebSocket endpoint
@@ -314,18 +319,49 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     session_id = new_session()
     print(f"[WS] App connected — session {session_id}")
 
-    # Background task: push telemetry every 500 ms.
-    async def telemetry_loop() -> None:
+    # Send ESP32 URL so the app can drive directly
+    await websocket.send_json({
+        "type":      "config",
+        "esp32_url": esp32_client.BASE_URL,
+        "servo":     esp32_client.servo_config,
+        "esc":       esp32_client.esc_config,
+    })
+
+    # ESP32 poll runs independently — never blocks the WebSocket push.
+    async def esp32_poll_loop() -> None:
         while True:
             try:
-                snapshot = await generate_telemetry()
+                await _poll_esp32()
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+
+    # WebSocket push runs at fixed 100 ms regardless of ESP32 speed.
+    async def telemetry_loop() -> None:
+        last_db   = 0.0
+        last_tick = time.time()
+        while True:
+            try:
+                check_fail_safe()
+                snapshot = _build_snapshot()
+
+                # Distance-based lap counting (speed in m/s × dt)
+                now = time.time()
+                dt  = now - last_tick
+                last_tick = now
+                lap_timer.tick(snapshot.get("speed", 0.0), dt)
+
                 await websocket.send_json(snapshot)
+                if now - last_db >= 2.0:
+                    save_telemetry(snapshot)
+                    last_db = now
             except WebSocketDisconnect:
                 break
             except Exception as e:
                 print(f"[TELEMETRY ERROR] {type(e).__name__}: {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
+    poll_task     = asyncio.create_task(esp32_poll_loop())
     telemetry_task = asyncio.create_task(telemetry_loop())
 
     try:
@@ -336,15 +372,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     except WebSocketDisconnect:
         print("[WS] App disconnected.")
-        # Trigger fail-safe immediately on disconnect.
         car.throttle          = 0
         car.fail_safe         = True
-        car.last_command_time = 0.0   # force fail-safe on next tick
+        car.last_command_time = 0.0
 
     except Exception as e:
         print(f"[WS ERROR] {e}")
 
     finally:
+        poll_task.cancel()
         telemetry_task.cancel()
 
 # ---------------------------------------------------------------------------

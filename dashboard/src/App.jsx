@@ -58,6 +58,8 @@ export default function App() {
   const wsRef            = useRef(null)
   const prevEmergencyRef = useRef(false)
   const prevFailSafeRef  = useRef(false)
+  const reconnectRef     = useRef(null)   // setTimeout handle
+  const shouldReconnect  = useRef(false)  // false after manual disconnect
 
   // ── Log helper ───────────────────────────────────────────────────────────
 
@@ -79,16 +81,21 @@ export default function App() {
     }
   }, [])
 
-  const connect = () => {
-    if (wsRef.current) wsRef.current.close()
-    addLog(`Connecting to ${wsUrl}…`)
+  const connectToUrl = (url, isRetry = false) => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.onerror = null
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    if (!isRetry) addLog(`Connecting to ${url}…`)
 
-    const ws = new WebSocket(wsUrl)
+    const ws = new WebSocket(url)
     wsRef.current = ws
 
     ws.onopen = () => {
       setConnected(true)
-      addLog(`Connected to ${wsUrl}`, 'success')
+      addLog(isRetry ? `Reconnected to ${url}` : `Connected to ${url}`, 'success')
     }
 
     ws.onmessage = (e) => {
@@ -118,11 +125,39 @@ export default function App() {
       prevFailSafeRef.current = data.fail_safe
     }
 
-    ws.onerror  = () => { addLog('WebSocket error', 'danger'); setConnected(false) }
-    ws.onclose  = () => { setConnected(false); setTelemetry(null); addLog('Disconnected') }
+    ws.onerror = () => {}  // onclose handles everything
+
+    ws.onclose = () => {
+      setConnected(false)
+      setTelemetry(null)
+      if (shouldReconnect.current) {
+        addLog('Connection lost — retrying in 2s…', 'warning')
+        reconnectRef.current = setTimeout(() => connectToUrl(url, true), 2000)
+      } else {
+        addLog('Disconnected')
+      }
+    }
   }
 
-  const disconnect = () => { wsRef.current?.close(); wsRef.current = null }
+  const connect = () => {
+    shouldReconnect.current = true
+    if (reconnectRef.current) { clearTimeout(reconnectRef.current); reconnectRef.current = null }
+    connectToUrl(wsUrl, false)
+  }
+
+  const disconnect = () => {
+    shouldReconnect.current = false
+    if (reconnectRef.current) { clearTimeout(reconnectRef.current); reconnectRef.current = null }
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.onerror = null
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    setConnected(false)
+    setTelemetry(null)
+    addLog('Disconnected')
+  }
 
   // ── Race summary ─────────────────────────────────────────────────────────
 
@@ -280,7 +315,13 @@ export default function App() {
             <KpiCard label="Battery Voltage" value={t ? `${t.battery_voltage}` : '—'}    unit="V" />
             <KpiCard label="Steering"        value={t ? (t.current_steering >= 0 ? `+${t.current_steering}` : t.current_steering) : '—'} />
             <KpiCard label="Throttle"        value={t ? `${t.current_throttle}` : '—'}   unit="%"    color={C.success} />
-            <KpiCard label="Mode"            value={t ? t.mode.toUpperCase() : '—'} />
+            <SplitKpiCard
+              topLabel="Mode"
+              topValue={t?.system?.mode ?? (t ? t.mode.toUpperCase() : '—')}
+              topColor={t?.system?.mode === 'AUTO' ? C.success : C.text}
+              bottomValue={t?.system?.['auto-mode-status'] ?? '—'}
+              bottomColor={t?.system?.['auto-mode-status'] === 'single-car' ? C.primary : t?.system?.['auto-mode-status'] === 'multi-car' ? C.warning : C.muted}
+            />
             <KpiCard label="Signal"          value={t ? t.signal_quality?.toUpperCase() : '—'} color={signalColor} />
             <KpiCard label="Emergency Stop"  value={t ? (t.emergency_stop ? 'ACTIVE' : 'OFF') : '—'}
               color={t?.emergency_stop ? C.danger : C.success} />
@@ -303,15 +344,9 @@ export default function App() {
             </Panel>
 
             <Panel title="Live Battery (%)" style={{ flex: 1 }}>
-              <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                  <XAxis dataKey="time" tick={{ fill: C.muted, fontSize: 10 }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fill: C.muted, fontSize: 10 }} domain={[0, 100]} />
-                  <Tooltip contentStyle={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, fontSize: 12 }} />
-                  <Line type="monotone" dataKey="battery" stroke={C.success} dot={false} strokeWidth={2} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
+              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.muted, fontSize: 13 }}>
+                No data available
+              </div>
             </Panel>
 
             <Panel title="Live Steering (-100 … +100)" style={{ flex: 1 }}>
@@ -599,17 +634,50 @@ function ControlTab({ connected, telemetry, sendWs, addLog }) {
             style={{ ...s2.armBtn, opacity: (!connected || armed) ? 0.35 : 1, cursor: (!connected || armed) ? 'not-allowed' : 'pointer' }}
             disabled={!connected || armed}
             onClick={() => { sendWs({ type: 'arm' }); addLog('ARM sent', 'info') }}
-          >
-            ARM
-          </button>
+          >ARM</button>
           <button
             style={{ ...s2.disarmBtn, opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
             disabled={!connected}
             onClick={() => { sendWs({ type: 'disarm' }); addLog('DISARM sent', 'info') }}
-          >
-            DISARM
-          </button>
+          >DISARM</button>
+          <button
+            style={{ ...s2.armBtn, background: '#e65100', opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
+            disabled={!connected}
+            onClick={() => { sendWs({ type: 'lap' }); addLog('LAP marked', 'info') }}
+          >⏱ LAP</button>
           <span style={motorBadgeStyle}>{mstate}</span>
+        </div>
+      </Panel>
+
+      {/* ── Run Mode ─────────────────────────────────────────────── */}
+      <Panel title="Run Mode">
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            style={{ ...s2.armBtn, background: t?.system?.mode === 'MANUAL' ? C.primary : C.surfaceAlt, color: t?.system?.mode === 'MANUAL' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+            disabled={!connected}
+            onClick={() => { sendWs({ type: 'set_mode', mode: 'manual' }); addLog('Mode → MANUAL', 'info') }}
+          >MANUAL</button>
+          <button
+            style={{ ...s2.armBtn, background: t?.system?.mode === 'AUTO' ? C.success : C.surfaceAlt, color: t?.system?.mode === 'AUTO' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+            disabled={!connected}
+            onClick={() => { sendWs({ type: 'set_mode', mode: 'auto' }); addLog('Mode → AUTO', 'info') }}
+          >AUTO</button>
+          <div style={{ width: 1, height: 28, background: C.border, margin: '0 4px' }} />
+          <button
+            style={{ ...s2.armBtn, background: t?.system?.['auto-mode-status'] === 'single-car' ? C.warning : C.surfaceAlt, color: t?.system?.['auto-mode-status'] === 'single-car' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+            disabled={!connected}
+            onClick={() => { sendWs({ type: 'set_auto_version', version: 'single' }); addLog('Auto → single-car', 'info') }}
+          >SINGLE CAR</button>
+          <button
+            style={{ ...s2.armBtn, background: t?.system?.['auto-mode-status'] === 'multi-car' ? C.warning : C.surfaceAlt, color: t?.system?.['auto-mode-status'] === 'multi-car' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+            disabled={!connected}
+            onClick={() => { sendWs({ type: 'set_auto_version', version: 'multi' }); addLog('Auto → multi-car', 'info') }}
+          >MULTI CAR</button>
+          {t?.system && (
+            <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
+              {t.system.mode ?? '—'} · {t.system['auto-mode-status'] ?? '—'}
+            </span>
+          )}
         </div>
       </Panel>
 
@@ -872,6 +940,17 @@ function HistoryTab({ sessions, loading, influxEnabled, onRefresh, onSelectSessi
 }
 
 // ── Reusable components ───────────────────────────────────────────────────
+
+function SplitKpiCard({ topLabel, topValue, topColor, bottomValue, bottomColor }) {
+  return (
+    <div style={{ ...s.kpiCard, justifyContent: 'center' }}>
+      <span style={{ fontSize: 24, fontWeight: 700, color: topColor ?? C.text }}>{topValue}</span>
+      <span style={{ fontSize: 11, color: C.muted }}>{topLabel}</span>
+      <div style={{ width: '100%', height: 1, background: C.border, margin: '5px 0' }} />
+      <span style={{ fontSize: 13, fontWeight: 600, color: bottomColor ?? C.muted }}>{bottomValue ?? '—'}</span>
+    </div>
+  )
+}
 
 function KpiCard({ label, value, unit, color }) {
   return (
