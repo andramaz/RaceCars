@@ -143,7 +143,7 @@ def check_fail_safe() -> None:
         car.fail_safe = False
 
 
-async def process_command(data: dict) -> None:
+async def process_command(data: dict) -> dict | None:
     """Parse, apply, and forward one incoming command message from the app."""
     msg_type = data.get("type")
 
@@ -173,7 +173,8 @@ async def process_command(data: dict) -> None:
         car.emergency_stop = True
         car.throttle       = 0
         print("[EMERGENCY STOP] ACTIVATED — all throttle commands blocked.")
-        await esp32_client.send_emergency()
+        resp = await esp32_client.send_emergency()
+        return {"for": "motor_control", **resp}
 
     elif msg_type == "reset_emergency_stop":
         car.emergency_stop    = False
@@ -183,15 +184,34 @@ async def process_command(data: dict) -> None:
 
     elif msg_type == "arm":
         print("[ARM] Arming motors.")
-        await esp32_client.send_arm(True)
+        resp = await esp32_client.send_arm(True)
+        return {"for": "motor_control", **resp}
 
     elif msg_type == "disarm":
         car.throttle = 0
         print("[DISARM] Disarming motors.")
-        await esp32_client.send_arm(False)
+        resp = await esp32_client.send_arm(False)
+        return {"for": "motor_control", **resp}
 
     elif msg_type == "lap":
         lap_timer.manual_lap()
+
+    elif msg_type == "set_lidar":
+        resp = await esp32_client.send_set_lidar(
+            int(data.get("stop", 50)),
+            int(data.get("slow", 100)),
+        )
+        return {"for": "lidar_panel", **resp}
+
+    elif msg_type == "set_prox":
+        resp = await esp32_client.send_set_prox(
+            int(data.get("lv1",  35)),
+            int(data.get("lv2",  60)),
+            int(data.get("lv3",  85)),
+            int(data.get("lv4", 115)),
+            int(data.get("close", 10)),
+        )
+        return {"for": "prox_panel", **resp}
 
     elif msg_type == "set_mode":
         mode = data.get("mode", "manual")
@@ -248,8 +268,6 @@ async def _poll_esp32() -> None:
         car.emergency_stop = False
 
     _on_motor_state_change(mstate or car.motor_state)
-    lap_timer.check(t.get("sonar"))
-
     # Store raw sensor blocks for snapshot building
     car._last_esp32_t = t
 
@@ -288,7 +306,7 @@ def _build_snapshot() -> dict:
         "last_lap_s":         lap_timer.last_lap,
         "best_lap_s":         lap_timer.best_lap,
     }
-    for key in ("sonar", "lidar", "imu", "odometry", "control", "system", "wireless", "limits"):
+    for key in ("sonar", "lidar", "imu", "odometry", "control", "system", "wireless", "limits", "battery"):
         if key in t:
             snapshot[key] = t[key]
     return snapshot
@@ -338,18 +356,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     # WebSocket push runs at fixed 100 ms regardless of ESP32 speed.
     async def telemetry_loop() -> None:
-        last_db   = 0.0
-        last_tick = time.time()
+        last_db = 0.0
         while True:
             try:
                 check_fail_safe()
                 snapshot = _build_snapshot()
-
-                # Distance-based lap counting (speed in m/s × dt)
                 now = time.time()
-                dt  = now - last_tick
-                last_tick = now
-                lap_timer.tick(snapshot.get("speed", 0.0), dt)
 
                 await websocket.send_json(snapshot)
                 if now - last_db >= 2.0:
@@ -366,9 +378,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     try:
         while True:
-            raw  = await websocket.receive_text()
-            data = json.loads(raw)
-            await process_command(data)
+            raw    = await websocket.receive_text()
+            data   = json.loads(raw)
+            result = await process_command(data)
+            if result:
+                await websocket.send_json({"type": "command_response", **result})
 
     except WebSocketDisconnect:
         print("[WS] App disconnected.")

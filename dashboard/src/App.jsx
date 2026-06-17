@@ -39,13 +39,14 @@ export default function App() {
       ? location.hostname : 'localhost'
     return `ws://${h}:8000/ws`
   })
-  const [connected, setConnected] = useState(false)
-  const [telemetry, setTelemetry] = useState(null)
-  const [chartData, setChartData] = useState([])
-  const [logs,      setLogs]      = useState([])
-  const [summary,   setSummary]   = useState(null)
-  const [fetching,  setFetching]  = useState(false)
-  const [activeTab, setActiveTab] = useState('live')
+  const [connected,   setConnected]   = useState(false)
+  const [telemetry,   setTelemetry]   = useState(null)
+  const [chartData,   setChartData]   = useState([])
+  const [logs,        setLogs]        = useState([])
+  const [summary,     setSummary]     = useState(null)
+  const [fetching,    setFetching]    = useState(false)
+  const [activeTab,   setActiveTab]   = useState('live')
+  const [cmdResponse, setCmdResponse] = useState({})
 
   // History
   const [sessions,        setSessions]        = useState([])
@@ -100,6 +101,11 @@ export default function App() {
 
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data)
+      if (data.type === 'command_response') {
+        const { type: _t, for: target, ...rest } = data
+        setCmdResponse(prev => ({ ...prev, [target]: rest }))
+        return
+      }
       if (data.type !== 'telemetry') return
 
       setTelemetry(data)
@@ -289,6 +295,7 @@ export default function App() {
             telemetry={t}
             sendWs={sendWs}
             addLog={addLog}
+            cmdResponse={cmdResponse}
           />
         )}
 
@@ -311,8 +318,8 @@ export default function App() {
 
           <div style={s.kpiGrid}>
             <KpiCard label="Speed"           value={t ? `${t.speed}` : '—'}              unit="m/s"  color={C.primary} />
-            <KpiCard label="Battery Charge"  value={t ? `${t.battery_percentage}` : '—'} unit="%"    color={battColor} />
-            <KpiCard label="Battery Voltage" value={t ? `${t.battery_voltage}` : '—'}    unit="V" />
+            <KpiCard label="Battery Charge"  value={t?.battery?.pct != null ? `${t.battery.pct}` : (t ? 'No data' : '—')} unit={t?.battery?.pct != null ? '%' : ''} color={t?.battery?.pct != null ? battColor : C.muted} />
+            <KpiCard label="Battery Voltage" value={t?.battery?.v   != null ? `${t.battery.v}`   : (t ? 'No data' : '—')} unit={t?.battery?.v   != null ? 'V'  : ''} />
             <KpiCard label="Steering"        value={t ? (t.current_steering >= 0 ? `+${t.current_steering}` : t.current_steering) : '—'} />
             <KpiCard label="Throttle"        value={t ? `${t.current_throttle}` : '—'}   unit="%"    color={C.success} />
             <SplitKpiCard
@@ -490,7 +497,34 @@ const OUTER_PX = 260
 const KNOB_PX  = 68
 const JOY_R    = (OUTER_PX - KNOB_PX) / 2
 
-function ControlTab({ connected, telemetry, sendWs, addLog }) {
+function ThresholdDisplay({ thresholds }) {
+  if (!thresholds) return (
+    <Panel title="Current ESP32 Thresholds">
+      <span style={{ fontSize: 12, color: C.muted }}>Waiting for ESP32 data…</span>
+    </Panel>
+  )
+  const row = (label, entries) => (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1, marginBottom: 6 }}>{label}</div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        {Object.entries(entries).map(([k, v]) => (
+          <div key={k}>
+            <div style={{ fontSize: 10, color: C.muted }}>{k.toUpperCase()}</div>
+            <div style={{ fontSize: 15, color: C.primary, fontFamily: 'monospace', fontWeight: 600 }}>{v ?? '—'}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+  return (
+    <Panel title="Current ESP32 Thresholds">
+      {thresholds.sonar && row('SONAR (cm)', thresholds.sonar)}
+      {thresholds.lidar && row('LIDAR (cm)', thresholds.lidar)}
+    </Panel>
+  )
+}
+
+function ControlTab({ connected, telemetry, sendWs, addLog, cmdResponse }) {
   const [steer, setSteer] = useState(0)
   const [thr,   setThr]   = useState(0)
 
@@ -624,62 +658,111 @@ function ControlTab({ connected, telemetry, sendWs, addLog }) {
     color:       mstate === 'ARMED' ? C.success : mstate === 'EMERGENCY' ? C.danger : C.muted,
   }
 
+  // ── Threshold snapshot (only updates on mount + after Apply) ─────────────
+  const [displayThresholds, setDisplayThresholds] = React.useState(null)
+  const tRef        = React.useRef(t)
+  const initDoneRef = React.useRef(false)
+  React.useEffect(() => { tRef.current = t }, [t])
+
+  // First telemetry with real threshold data → snapshot once
+  React.useEffect(() => {
+    if (initDoneRef.current) return
+    if (!t?.sonar?.thresholds) return
+    setDisplayThresholds({ sonar: t.sonar.thresholds, lidar: t?.lidar?.thresholds ?? null })
+    initDoneRef.current = true
+  }, [t])
+
+  // After Apply response → wait 600ms then snapshot (ESP32 poll needs time to update)
+  React.useEffect(() => {
+    if (!cmdResponse?.prox_panel && !cmdResponse?.lidar_panel) return
+    const tid = setTimeout(() => {
+      const latest = tRef.current
+      if (latest?.sonar?.thresholds) {
+        setDisplayThresholds({ sonar: latest.sonar.thresholds, lidar: latest?.lidar?.thresholds ?? null })
+      }
+    }, 600)
+    return () => clearTimeout(tid)
+  }, [cmdResponse?.prox_panel, cmdResponse?.lidar_panel])
+
+  const motorResp = cmdResponse?.motor_control
+
   return (
     <div style={s2.wrap}>
 
-      {/* ── Arm / Disarm / State ─────────────────────────────────── */}
-      <Panel title="Motor Control">
-        <div style={s2.armRow}>
-          <button
-            style={{ ...s2.armBtn, opacity: (!connected || armed) ? 0.35 : 1, cursor: (!connected || armed) ? 'not-allowed' : 'pointer' }}
-            disabled={!connected || armed}
-            onClick={() => { sendWs({ type: 'arm' }); addLog('ARM sent', 'info') }}
-          >ARM</button>
-          <button
-            style={{ ...s2.disarmBtn, opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
-            disabled={!connected}
-            onClick={() => { sendWs({ type: 'disarm' }); addLog('DISARM sent', 'info') }}
-          >DISARM</button>
-          <button
-            style={{ ...s2.armBtn, background: '#e65100', opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
-            disabled={!connected}
-            onClick={() => { sendWs({ type: 'lap' }); addLog('LAP marked', 'info') }}
-          >⏱ LAP</button>
-          <span style={motorBadgeStyle}>{mstate}</span>
-        </div>
-      </Panel>
+      {/* ── Two-column layout: left = controls, right = thresholds ── */}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
 
-      {/* ── Run Mode ─────────────────────────────────────────────── */}
-      <Panel title="Run Mode">
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button
-            style={{ ...s2.armBtn, background: t?.system?.mode === 'MANUAL' ? C.primary : C.surfaceAlt, color: t?.system?.mode === 'MANUAL' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
-            disabled={!connected}
-            onClick={() => { sendWs({ type: 'set_mode', mode: 'manual' }); addLog('Mode → MANUAL', 'info') }}
-          >MANUAL</button>
-          <button
-            style={{ ...s2.armBtn, background: t?.system?.mode === 'AUTO' ? C.success : C.surfaceAlt, color: t?.system?.mode === 'AUTO' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
-            disabled={!connected}
-            onClick={() => { sendWs({ type: 'set_mode', mode: 'auto' }); addLog('Mode → AUTO', 'info') }}
-          >AUTO</button>
-          <div style={{ width: 1, height: 28, background: C.border, margin: '0 4px' }} />
-          <button
-            style={{ ...s2.armBtn, background: t?.system?.['auto-mode-status'] === 'single-car' ? C.warning : C.surfaceAlt, color: t?.system?.['auto-mode-status'] === 'single-car' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
-            disabled={!connected}
-            onClick={() => { sendWs({ type: 'set_auto_version', version: 'single' }); addLog('Auto → single-car', 'info') }}
-          >SINGLE CAR</button>
-          <button
-            style={{ ...s2.armBtn, background: t?.system?.['auto-mode-status'] === 'multi-car' ? C.warning : C.surfaceAlt, color: t?.system?.['auto-mode-status'] === 'multi-car' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
-            disabled={!connected}
-            onClick={() => { sendWs({ type: 'set_auto_version', version: 'multi' }); addLog('Auto → multi-car', 'info') }}
-          >MULTI CAR</button>
-          {t?.system && (
-            <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
-              {t.system.mode ?? '—'} · {t.system['auto-mode-status'] ?? '—'}
-            </span>
-          )}
+        {/* LEFT: Motor Control + Run Mode */}
+        <div style={{ flex: '1 1 320px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+          <Panel title="Motor Control">
+            <div style={s2.armRow}>
+              <button
+                style={{ ...s2.armBtn, opacity: (!connected || armed) ? 0.35 : 1, cursor: (!connected || armed) ? 'not-allowed' : 'pointer' }}
+                disabled={!connected || armed}
+                onClick={() => { sendWs({ type: 'arm' }); addLog('ARM sent', 'info') }}
+              >ARM</button>
+              <button
+                style={{ ...s2.disarmBtn, opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
+                disabled={!connected}
+                onClick={() => { sendWs({ type: 'disarm' }); addLog('DISARM sent', 'info') }}
+              >DISARM</button>
+              <button
+                style={{ ...s2.armBtn, background: '#e65100', opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
+                disabled={!connected}
+                onClick={() => { sendWs({ type: 'lap' }); addLog('LAP marked', 'info') }}
+              >⏱ LAP</button>
+              <span style={motorBadgeStyle}>{mstate}</span>
+            </div>
+            {motorResp && (
+              <div style={{ marginTop: 8, padding: '6px 10px', borderRadius: 6, background: motorResp.ok ? C.success + '22' : C.danger + '22', border: `1px solid ${motorResp.ok ? C.success : C.danger}`, fontSize: 12, fontFamily: 'monospace', color: motorResp.ok ? C.success : C.danger }}>
+                {motorResp.msg || (motorResp.ok ? 'OK' : 'Error (no message from ESP32)')}
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="Run Mode">
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                style={{ ...s2.armBtn, background: t?.system?.mode === 'MANUAL' ? C.primary : C.surfaceAlt, color: t?.system?.mode === 'MANUAL' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+                disabled={!connected}
+                onClick={() => { sendWs({ type: 'set_mode', mode: 'manual' }); addLog('Mode → MANUAL', 'info') }}
+              >MANUAL</button>
+              <button
+                style={{ ...s2.armBtn, background: t?.system?.mode === 'AUTO' ? C.success : C.surfaceAlt, color: t?.system?.mode === 'AUTO' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+                disabled={!connected}
+                onClick={() => { sendWs({ type: 'set_mode', mode: 'auto' }); addLog('Mode → AUTO', 'info') }}
+              >AUTO</button>
+              <div style={{ width: 1, height: 28, background: C.border, margin: '0 4px' }} />
+              <button
+                style={{ ...s2.armBtn, background: t?.system?.['auto-mode-status'] === 'single-car' ? C.warning : C.surfaceAlt, color: t?.system?.['auto-mode-status'] === 'single-car' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+                disabled={!connected}
+                onClick={() => { sendWs({ type: 'set_auto_version', version: 'single' }); addLog('Auto → single-car', 'info') }}
+              >SINGLE CAR</button>
+              <button
+                style={{ ...s2.armBtn, background: t?.system?.['auto-mode-status'] === 'multi-car' ? C.warning : C.surfaceAlt, color: t?.system?.['auto-mode-status'] === 'multi-car' ? '#000' : C.muted, opacity: !connected ? 0.35 : 1 }}
+                disabled={!connected}
+                onClick={() => { sendWs({ type: 'set_auto_version', version: 'multi' }); addLog('Auto → multi-car', 'info') }}
+              >MULTI CAR</button>
+              {t?.system && (
+                <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
+                  {t.system.mode ?? '—'} · {t.system['auto-mode-status'] ?? '—'}
+                </span>
+              )}
+            </div>
+          </Panel>
+
+          <ThresholdDisplay thresholds={displayThresholds} />
+
         </div>
-      </Panel>
+
+        {/* RIGHT: Threshold panels */}
+        <div style={{ flex: '2 1 320px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <ProxPanel  connected={connected} sendWs={sendWs} addLog={addLog} response={cmdResponse?.prox_panel} />
+          <LidarPanel connected={connected} sendWs={sendWs} addLog={addLog} response={cmdResponse?.lidar_panel} />
+        </div>
+
+      </div>
 
       {/* ── Joystick ─────────────────────────────────────────────── */}
       <Panel title="Joystick — drag or use WASD / arrow keys">
@@ -941,6 +1024,93 @@ function HistoryTab({ sessions, loading, influxEnabled, onRefresh, onSelectSessi
 
 // ── Reusable components ───────────────────────────────────────────────────
 
+function ProxPanel({ connected, sendWs, addLog, response }) {
+  const [vals, setVals] = React.useState({ lv1: '', lv2: '', lv3: '', lv4: '', close: '' })
+
+  const set = (k, v) => setVals(prev => ({ ...prev, [k]: Number(v) }))
+
+  const send = () => {
+    sendWs({ type: 'set_prox', ...vals })
+    addLog(`Prox thresholds sent: lv1=${vals.lv1} lv2=${vals.lv2} lv3=${vals.lv3} lv4=${vals.lv4} close=${vals.close}`, 'info')
+  }
+
+  const inp = (key, label, min) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, flex: 1, minWidth: 56 }}>
+      <span style={{ fontSize: 10, color: C.muted, letterSpacing: 1 }}>{label}</span>
+      <input
+        type="number" value={vals[key]} min={min}
+        onChange={e => set(key, e.target.value)}
+        style={{ background: C.surfaceAlt, border: `1px solid ${C.border}`, color: C.primary, borderRadius: 6, padding: '4px 6px', fontSize: 13, fontFamily: 'monospace', width: '100%' }}
+      />
+    </div>
+  )
+
+  return (
+    <Panel title="Sonar Proximity Thresholds">
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+        Only applies when DISARMED + MANUAL. Rules: close ≥ 10, lv1 ≥ 25, each level ≥ 20cm gap.
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        {inp('close', 'CLOSE (cm)', 10)}
+        {inp('lv1',   'LV1 (cm)',   25)}
+        {inp('lv2',   'LV2 (cm)',   45)}
+        {inp('lv3',   'LV3 (cm)',   65)}
+        {inp('lv4',   'LV4 (cm)',   85)}
+      </div>
+      <button
+        style={{ ...s2.armBtn, background: C.primaryDark, opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
+        disabled={!connected}
+        onClick={send}
+      >Apply</button>
+      {response && (
+        <div style={{ marginTop: 8, padding: '6px 10px', borderRadius: 6, background: response.ok ? C.success + '22' : C.danger + '22', border: `1px solid ${response.ok ? C.success : C.danger}`, fontSize: 12, fontFamily: 'monospace', color: response.ok ? C.success : C.danger }}>
+          {response.msg || (response.ok ? 'OK' : 'Error (no message from ESP32)')}
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+function LidarPanel({ connected, sendWs, addLog, response }) {
+  const [vals, setVals] = React.useState({ stop: '', slow: '' })
+  const set = (k, v) => setVals(prev => ({ ...prev, [k]: Number(v) }))
+  const send = () => {
+    sendWs({ type: 'set_lidar', ...vals })
+    addLog(`LiDAR thresholds sent: stop=${vals.stop} slow=${vals.slow}`, 'info')
+  }
+  const inp = (key, label, min) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, flex: 1, minWidth: 100 }}>
+      <span style={{ fontSize: 10, color: C.muted, letterSpacing: 1 }}>{label}</span>
+      <input
+        type="number" value={vals[key]} min={min}
+        onChange={e => set(key, e.target.value)}
+        style={{ background: C.surfaceAlt, border: `1px solid ${C.border}`, color: C.primary, borderRadius: 6, padding: '4px 8px', fontSize: 13, fontFamily: 'monospace', width: '100%' }}
+      />
+    </div>
+  )
+  return (
+    <Panel title="LiDAR Thresholds">
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+        Only applies when DISARMED + MANUAL. Rules: stop ≥ 40, slow ≥ stop×2.
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        {inp('stop', 'STOP — emergency trigger (cm)', 40)}
+        {inp('slow', 'SLOW — reduced speed (cm)',     80)}
+      </div>
+      <button
+        style={{ ...s2.armBtn, background: C.primaryDark, opacity: !connected ? 0.35 : 1, cursor: !connected ? 'not-allowed' : 'pointer' }}
+        disabled={!connected}
+        onClick={send}
+      >Apply</button>
+      {response && (
+        <div style={{ marginTop: 8, padding: '6px 10px', borderRadius: 6, background: response.ok ? C.success + '22' : C.danger + '22', border: `1px solid ${response.ok ? C.success : C.danger}`, fontSize: 12, fontFamily: 'monospace', color: response.ok ? C.success : C.danger }}>
+          {response.msg || (response.ok ? 'OK' : 'Error (no message from ESP32)')}
+        </div>
+      )}
+    </Panel>
+  )
+}
+
 function SplitKpiCard({ topLabel, topValue, topColor, bottomValue, bottomColor }) {
   return (
     <div style={{ ...s.kpiCard, justifyContent: 'center' }}>
@@ -1034,9 +1204,9 @@ const s = {
 
 // Control tab-specific styles
 const s2 = {
-  wrap: { display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 700 },
+  wrap: { display: 'flex', flexDirection: 'column', gap: 16 },
 
-  armRow: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' },
+  armRow: { display: 'flex', alignItems: 'center', gap: 12 },
   armBtn: {
     padding: '9px 32px', borderRadius: 8, border: 'none',
     cursor: 'pointer', fontSize: 14, fontWeight: 700,

@@ -151,31 +151,59 @@ async def send_drive(steering: int, throttle: int) -> bool:
 # Arm / Disarm
 # ---------------------------------------------------------------------------
 
-async def send_arm(armed: bool) -> bool:
+async def send_arm(armed: bool) -> dict:
     """
     Arm (armed=True) or disarm (armed=False) the motor.
     Retries up to 3 times with 400 ms between attempts.
+    Returns the ESP32 response dict.
     """
     if not BASE_URL:
-        return False
+        return {"ok": False, "msg": "ESP32 not configured"}
     endpoint = "/arm" if armed else "/disarm"
     label    = "ARM" if armed else "DISARM"
     for attempt in range(1, 4):
         try:
             r = await _client().post(f"{BASE_URL}{endpoint}", timeout=DRIVE_TIMEOUT)
-            if r.status_code == 200:
-                print(f"[ESP32] {label} OK (attempt {attempt})")
-                return True
-            print(f"[ESP32] {label} attempt {attempt} → HTTP {r.status_code}")
+            print(f"[ESP32] {label} HTTP {r.status_code} (attempt {attempt})")
+            return r.json()
         except Exception as e:
             print(f"[ESP32] {label} attempt {attempt} failed: {type(e).__name__}: {e}")
         await asyncio.sleep(0.4)
-    print(f"[ESP32] {label} failed after 3 attempts")
-    return False
+    return {"ok": False, "msg": f"{label} failed after 3 attempts"}
 
 # ---------------------------------------------------------------------------
 # Mode / Auto-version
 # ---------------------------------------------------------------------------
+
+async def send_set_prox(lv1: int, lv2: int, lv3: int, lv4: int, close: int) -> dict:
+    """Update sonar proximity thresholds. Returns ESP32 response dict."""
+    if not BASE_URL:
+        return {"ok": False, "msg": "ESP32 not configured"}
+    try:
+        r = await _client().post(
+            f"{BASE_URL}/set-prox",
+            params={"lv1": lv1, "lv2": lv2, "lv3": lv3, "lv4": lv4, "close": close},
+            timeout=DRIVE_TIMEOUT,
+        )
+        return r.json()
+    except Exception as e:
+        print(f"[ESP32] send_set_prox failed: {e}")
+        return {"ok": False, "msg": str(e)}
+
+async def send_set_lidar(stop: int, slow: int) -> dict:
+    """Update LiDAR thresholds. Returns ESP32 response dict."""
+    if not BASE_URL:
+        return {"ok": False, "msg": "ESP32 not configured"}
+    try:
+        r = await _client().post(
+            f"{BASE_URL}/set-lidar",
+            params={"stop": stop, "slow": slow},
+            timeout=DRIVE_TIMEOUT,
+        )
+        return r.json()
+    except Exception as e:
+        print(f"[ESP32] send_set_lidar failed: {e}")
+        return {"ok": False, "msg": str(e)}
 
 async def send_mode(mode: str) -> bool:
     """Switch ESP32 between 'auto' and 'manual' run mode."""
@@ -205,19 +233,16 @@ async def send_auto_version(version: str) -> bool:
 # Emergency stop
 # ---------------------------------------------------------------------------
 
-async def send_emergency() -> bool:
-    """
-    Send emergency stop to ESP32 via POST /estop.
-    Moves ESP32 to EMERGENCY state. Requires /disarm to recover.
-    """
+async def send_emergency() -> dict:
+    """Send emergency stop to ESP32. Returns ESP32 response dict."""
     if not BASE_URL:
-        return False
+        return {"ok": False, "msg": "ESP32 not configured"}
     try:
         r = await _client().post(f"{BASE_URL}/estop", timeout=DRIVE_TIMEOUT)
-        return r.status_code == 200
+        return r.json()
     except Exception as e:
         print(f"[ESP32] send_emergency failed: {e}")
-        return False
+        return {"ok": False, "msg": str(e)}
 
 # ---------------------------------------------------------------------------
 # Telemetry poll
